@@ -1,0 +1,224 @@
+Processing alphapi (platform: espressif32; board: esp32-s3-devkitc-1; framework: arduino)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/espressif32/esp32-s3-devkitc-1.html
+PLATFORM: Espressif 32 (7.0.0) > Espressif ESP32-S3-DevKitC-1-N8 (8 MB QD, No PSRAM)
+HARDWARE: ESP32S3 240MHz, 320KB RAM, 8MB Flash
+DEBUG: Current (esp-builtin) On-board (esp-builtin) External (cmsis-dap, esp-bridge, esp-prog, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa)
+PACKAGES: 
+ - framework-arduinoespressif32 @ 3.20017.241212+sha.dcc1105b 
+ - tool-esptoolpy @ 2.41100.0 (4.11.0) 
+ - toolchain-riscv32-esp @ 8.4.0+2021r2-patch5 
+ - toolchain-xtensa-esp32s3 @ 8.4.0+2021r2-patch5
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ deep+, Compatibility ~ soft
+Found 37 compatible libraries
+Scanning dependencies...
+Dependency Graph
+|-- lvgl @ 9.3.0
+|-- JPEGDEC @ 1.8.5
+|-- DevLab_LibHelix @ 0.9.4
+|-- LittleFS @ 2.0.0
+|-- FS @ 2.0.0
+|-- Preferences @ 2.0.0
+|-- WiFi @ 2.0.0
+|-- WiFiClientSecure @ 2.0.0
+|-- SPI @ 2.0.0
+Building in release mode
+Compiling .pio\build\alphapi\src\app\alarm.cpp.o
+Compiling .pio\build\alphapi\src\app\app_cmd.cpp.o
+Compiling .pio\build\alphapi\src\app\app_config.cpp.o
+Compiling .pio\build\alphapi\src\app\app_net.cpp.o
+Compiling .pio\build\alphapi\src\app\app_wyy.cpp.o
+Compiling .pio\build\alphapi\src\app\autoplay.cpp.o
+Compiling .pio\build\alphapi\src\app\player.cpp.o
+Compiling .pio\build\alphapi\src\audio\pcm_out.cpp.o
+Compiling .pio\build\alphapi\src\display_st7789.cpp.o
+Compiling .pio\build\alphapi\src\main.cpp.o
+Compiling .pio\build\alphapi\src\n32\n32_link.cpp.o
+Compiling .pio\build\alphapi\src\net\http80.cpp.o
+Compiling .pio\build\alphapi\src\net\mjpeg.cpp.o
+Compiling .pio\build\alphapi\src\net\prov_portal.cpp.o
+Compiling .pio\build\alphapi\src\net\web_server.cpp.o
+Compiling .pio\build\alphapi\src\net\webdav.cpp.o
+Compiling .pio\build\alphapi\src\ui_port\font_cjk_16.c.o
+Compiling .pio\build\alphapi\src\ui_port\font_cjk_20.c.o
+Compiling .pio\build\alphapi\src\ui_port\font_cjk_24.c.o
+Compiling .pio\build\alphapi\src\ui_port\font_clock_32.c.o
+Compiling .pio\build\alphapi\src\ui_port\font_clock_40.c.o
+Compiling .pio\build\alphapi\src\ui_port\font_clock_48.c.o
+Compiling .pio\build\alphapi\src\ui_port\hal\backlight.c.o
+Compiling .pio\build\alphapi\src\ui_port\hal\battery.c.o
+Compiling .pio\build\alphapi\src\ui_port\hal\display.c.o
+Compiling .pio\build\alphapi\src\ui_port\hal\indev_touch.c.o
+Compiling .pio\build\alphapi\src\ui_port\hal\panel.cpp.o
+Compiling .pio\build\alphapi\src\ui_port\hal\screen.c.o
+Compiling .pio\build\alphapi\src\ui_port\keys_bridge.cpp.o
+Compiling .pio\build\alphapi\src\ui_port\nav\bind_wizard.c.o
+Compiling .pio\build\alphapi\src\ui_port\nav\focus.c.o
+Compiling .pio\build\alphapi\src\ui_port\nav\keymap.c.o
+Compiling .pio\build\alphapi\src\ui_port\nav\swipe.c.o
+Compiling .pio\build\alphapi\src\ui_port\port_platform.cpp.o
+Compiling .pio\build\alphapi\src\ui_port\proto\event_parse.c.o
+Compiling .pio\build\alphapi\src\ui_port\proto\go_proc.c.o
+Compiling .pio\build\alphapi\src\ui_port\state\app_state.c.o
+Compiling .pio\build\alphapi\src\ui_port\state\cmd.c.o
+Compiling .pio\build\alphapi\src\ui_port\state\ui_settings.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\dev_shot.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\layer_bg.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\page.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\page_clock.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\page_player.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\page_settings.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\theme.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\ui_alarm.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\ui_bright.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\ui_font.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui\ui_pause.c.o
+Compiling .pio\build\alphapi\src\ui_port\ui_app.cpp.o
+Building .pio\build\alphapi\bootloader.bin
+Generating partitions .pio\build\alphapi\partitions.bin
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_group.c.o
+esptool.py v4.11.0
+Creating esp32s3 image...
+Merged 1 ELF section
+Successfully created esp32s3 image.
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_class.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_draw.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_event.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_id_builtin.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_pos.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_property.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_scroll.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_style.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_style_gen.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_obj_tree.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\core\lv_refr.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\display\lv_display.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\dma2d\lv_draw_dma2d.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\dma2d\lv_draw_dma2d_fill.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\dma2d\lv_draw_dma2d_img.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_3d.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_arc.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_buf.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_image.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_label.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_line.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_mask.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_rect.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_triangle.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_draw_vector.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\lv_image_decoder.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_arc.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_border.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_fill.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_img.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_label.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_layer.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_line.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_stm32_hal.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_triangle.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_draw_nema_gfx_utils.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nema_gfx\lv_nema_gfx_path.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\g2d\lv_draw_buf_g2d.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\g2d\lv_draw_g2d.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\g2d\lv_draw_g2d_fill.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\g2d\lv_draw_g2d_img.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\g2d\lv_g2d_buf_map.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\g2d\lv_g2d_utils.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\pxp\lv_draw_buf_pxp.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\pxp\lv_draw_pxp.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\pxp\lv_draw_pxp_fill.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\pxp\lv_draw_pxp_img.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\pxp\lv_draw_pxp_layer.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\pxp\lv_pxp_cfg.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\pxp\lv_pxp_osa.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\pxp\lv_pxp_utils.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_buf_vglite.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite_arc.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite_border.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite_fill.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite_img.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite_label.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite_layer.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite_line.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_draw_vglite_triangle.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_vglite_buf.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_vglite_matrix.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_vglite_path.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\nxp\vglite\lv_vglite_utils.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\opengles\lv_draw_opengles.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_arc.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_border.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_fill.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_image.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_label.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_line.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_mask_rectangle.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_triangle.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\renesas\dave2d\lv_draw_dave2d_utils.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sdl\lv_draw_sdl.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\helium\lv_blend_helium.S.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend_to_al88.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend_to_argb8888.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend_to_argb8888_premultiplied.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend_to_i1.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend_to_l8.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend_to_rgb565.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend_to_rgb565_swapped.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\lv_draw_sw_blend_to_rgb888.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\blend\neon\lv_blend_neon.S.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_arc.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_border.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_box_shadow.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_fill.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_grad.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_img.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_letter.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_line.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_mask.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_mask_rect.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_transform.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_triangle.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_utils.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\sw\lv_draw_sw_vector.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_buf_vg_lite.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_arc.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_border.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_box_shadow.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_fill.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_img.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_label.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_layer.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_line.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_mask_rect.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_triangle.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_draw_vg_lite_vector.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_vg_lite_decoder.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_vg_lite_grad.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_vg_lite_math.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_vg_lite_path.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_vg_lite_pending.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_vg_lite_stroke.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\draw\vg_lite\lv_vg_lite_utils.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\drm\lv_linux_drm.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\fb\lv_linux_fbdev.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\ft81x\lv_ft81x.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\ili9341\lv_ili9341.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\lcd\lv_lcd_generic_mipi.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\renesas_glcdc\lv_renesas_glcdc.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\st7735\lv_st7735.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\st7789\lv_st7789.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\st7796\lv_st7796.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\st_ltdc\lv_st_ltdc.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\display\tft_espi\lv_tft_espi.cpp.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\evdev\lv_evdev.c.o
+Compiling .pio\build\alphapi\lib06d\lvgl\drivers\glfw\lv_glfw_window.c.o

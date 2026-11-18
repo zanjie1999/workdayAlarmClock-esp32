@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="format-detection" content="telephone=no" />
+    <title>闹钟设置</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="main-container">
+        <header class="page-head">
+            <a href="/"><img class="brand" src="/favicon.ico" width="44" height="44" alt="返回首页"></a>
+            <div class="page-head-text">
+                <h1 class="page-title">闹钟设置</h1>
+            </div>
+        </header>
+
+        <table id="alarms"></table>
+
+        <form class="card" action="/addAlarm" id="alarmForm">
+            <h2 class="group-title">添加闹钟</h2>
+            <div class="ui-row ui-row-stack">
+                <label class="ui-label" for="hhmm">时间（24小时制 时时分分）：</label>
+                <div class="ui-ctl">
+                    <input type="number" name="hhmm" id="hhmm" placeholder="HHmm" min="0" max="2359">
+                </div>
+            </div>
+            <div class="ui-row ui-row-stack ui-row-top">
+                <span class="ui-label">闹钟类型：</span>
+                <div class="ui-ctl">
+                    <div class="check-group">
+                        <label><input type="checkbox" name="type2" value="1">法定工作日</label>
+                        <label><input type="checkbox" name="type2" value="2">法定休息日</label>
+                        <label><input type="checkbox" name="type2" value="3">一次</label>
+                        <label><input type="checkbox" name="type2" value="4">每天</label>
+                        <label><input type="checkbox" name="type2" value="5">周日</label>
+                        <label><input type="checkbox" name="type2" value="6">周一</label>
+                        <label><input type="checkbox" name="type2" value="7">周二</label>
+                        <label><input type="checkbox" name="type2" value="8">周三</label>
+                        <label><input type="checkbox" name="type2" value="9">周四</label>
+                        <label><input type="checkbox" name="type2" value="10">周五</label>
+                        <label><input type="checkbox" name="type2" value="11">周六</label>
+                    </div>
+                </div>
+            </div>
+            <div class="ui-row ui-row-stack">
+                <label class="ui-label" for="datemmdd">或者指定日期（月月日日,分隔录入多个）：</label>
+                <div class="ui-ctl">
+                    <input type="text" name="datemmdd" id="datemmdd" placeholder="mmdd,mmdd">
+                    <a href="javascript:;" class="cal-toggle" id="calToggle" onclick="calToggle();return false;">点击展开日历</a>
+                    <div class="cal-panel" id="calPanel" style="display:none">
+                        <div class="cal-head">
+                            <div class="cal-head-side">
+                                <button type="button" class="ghost cal-nav" id="calPrev" onclick="calNav(-1)">上月</button>
+                            </div>
+                            <div class="cal-head-title" id="calTitle">-</div>
+                            <div class="cal-head-side cal-head-side-r">
+                                <button type="button" class="ghost cal-nav" id="calNext" onclick="calNav(1)">下月</button>
+                            </div>
+                        </div>
+                        <table class="cal-grid">
+                            <thead>
+                                <tr>
+                                    <th class="cal-we">日</th><th>一</th><th>二</th><th>三</th>
+                                    <th>四</th><th>五</th><th class="cal-we">六</th>
+                                </tr>
+                            </thead>
+                            <tbody id="calBody"></tbody>
+                        </table>
+                        <div class="cal-foot">
+                            <button type="button" class="ghost" onclick="calInvert()">反选</button>
+                            <button type="button" class="ghost" onclick="calClear()">清空</button>
+                            <span class="cal-count" id="calCount"></span>
+                        </div>
+                        <p class="cal-note" id="calNote"></p>
+                    </div>
+                </div>
+            </div>
+            <input type="hidden" name="type" id="alarmtype">
+            <div class="ui-row ui-row-end">
+                <div class="ui-ctl">
+                    <button type="submit">添加闹钟</button>
+                </div>
+            </div>
+            <p class="ui-hint">
+                <a href="/testAlarm">模拟闹钟</a>　<a href="/skipAlarm?n=1">跳过1次闹钟</a>　<a href="/skipAlarm?n=0">取消跳过</a>
+            </p>
+        </form>
+
+        <form class="card" action="/updateCfg" id="cfgForm">
+            <h2 class="group-title">设置</h2>
+            <div class="ui-row">
+                <label class="ui-label" for="volDefault">默认音量</label>
+                <div class="ui-ctl">
+                    <input type="number" name="volDefault" id="volDefault" placeholder="0-100" min="0" max="100">
+                </div>
+            </div>
+            <div class="ui-row">
+                <label class="ui-label" for="volAlarm">闹钟音量</label>
+                <div class="ui-ctl">
+                    <input type="number" name="volAlarm" id="volAlarm" placeholder="0-100" min="0" max="100">
+                </div>
+            </div>
+            <div class="ui-row ui-inline">
+                <label class="ui-label" for="alarmTime">闹钟时长</label>
+                <div class="ui-ctl">
+                    <input type="number" name="alarmTime" id="alarmTime" placeholder="4.5" min="0" step="0.5">
+                    <span class="unit">分钟</span>
+                </div>
+            </div>
+            <p class="ui-hint">（闹钟一直播放直到达到设定时长）</p>
+
+            <div class="ui-sep"></div>
+
+            <div class="ui-row">
+                <label class="ui-label" for="musicApi">音乐来源</label>
+                <div class="ui-ctl">
+                    <select name="musicApi" id="musicApi">
+                        <option value="netease">网易云音乐</option>
+                        <option value="qq">QQ音乐</option>
+                        <option value="kugou">酷狗音乐</option>
+                    </select>
+                </div>
+            </div>
+            <p class="ui-hint">（切换后需要到我的歌单重新用Cookie登录）</p>
+            <div class="ui-row">
+                <label class="ui-label" for="nePlayListId">闹钟歌单id</label>
+                <div class="ui-ctl">
+                    <input type="text" name="nePlayListId" id="nePlayListId" placeholder="分享链接的id=">
+                </div>
+            </div>
+            <div class="ui-row">
+                <label class="ui-label" for="defPlayListId">默认歌单id</label>
+                <div class="ui-ctl">
+                    <input type="text" name="defPlayListId" id="defPlayListId" placeholder="分享链接的id=">
+                </div>
+            </div>
+            <p class="ui-hint">
+                （在没有上一首时按上一首时播放该歌单，id可以在 <a href="/playlist.html">我的歌单</a> 中查看）<br>
+                （歌单也能填 ./ 或 / 开头的路径，会扫描该目录下的文件当歌单）
+            </p>
+
+            <div class="ui-sep"></div>
+
+            <div class="ui-row">
+                <label class="ui-label" for="tz">时区UTC+</label>
+                <div class="ui-ctl">
+                    <input type="number" name="tz" id="tz" placeholder="中国是+8区填8">
+                </div>
+            </div>
+            <div class="ui-row">
+                <label class="ui-label" for="weatherCityCode">天气代码</label>
+                <div class="ui-ctl">
+                    <input type="text" name="weatherCityCode" id="weatherCityCode" placeholder="不填不播报">
+                    <button type="button" class="ghost btn-sm btn-below" onclick="getCityCode()">输入市/区查询</button>
+                </div>
+            </div>
+            <div class="ui-row">
+                <label class="ui-label" for="weatherUpdate">更新时间</label>
+                <div class="ui-ctl">
+                    <input type="number" name="weatherUpdate" id="weatherUpdate" placeholder="HHmm">
+                </div>
+            </div>
+            <p class="ui-hint">（每天定时更新保存作为昨天天气）</p>
+
+            <div class="ui-sep"></div>
+
+            <div class="ui-row">
+                <span class="ui-label">CPU唤醒锁</span>
+                <div class="ui-ctl">
+                    <label><input type="checkbox" name="wakelock" id="wakelock" value="1">重启生效</label>
+                </div>
+            </div>
+            <p class="ui-hint">（关闭可以最大程度的节省电量，但闹钟可能不响）</p>
+            <div class="ui-row">
+                <span class="ui-label">停止时静音</span>
+                <div class="ui-ctl">
+                    <input type="checkbox" name="muteWhenStop" id="muteWhenStop" value="1">
+                </div>
+            </div>
+            <div class="ui-row">
+                <label class="ui-label" for="musicQuality">音质选择</label>
+                <div class="ui-ctl">
+                    <select name="musicQuality" id="musicQuality">
+                        <option value="standard">128 mp3</option>
+                        <option value="exhigh">320 mp3</option>
+                        <option value="lossless">新无损flac(小)</option>
+                        <option value="hires">老无损HiRes(大)</option>
+                    </select>
+                </div>
+            </div>
+            <p class="ui-hint">量力而行，音质过高可能会卡或无法播放，推荐128处理最快</p>
+
+            <div class="ui-sep"></div>
+
+            <div class="ui-row">
+                <label class="ui-label" for="savePath">缓存目录</label>
+                <div class="ui-ctl">
+                    <input type="text" name="savePath" id="savePath" placeholder="默认留空不缓存">
+                </div>
+            </div>
+            <div class="ui-row ui-inline">
+                <label class="ui-label" for="cacheLimit">缓存上限</label>
+                <div class="ui-ctl">
+                    <input type="number" name="cacheLimit" id="cacheLimit" min="1" placeholder="1024">
+                    <span class="unit">MB</span>
+                </div>
+            </div>
+            <p class="ui-hint">
+                请输入绝对路径，保证有权限访问，比如/sdcard/Music，或者输入./music保存在内部　<a href="/delSave">清空缓存</a>
+            </p>
+
+            <div class="ui-sep"></div>
+
+            <div class="ui-row">
+                <span class="ui-label">全屋同步播放主机</span>
+                <div class="ui-ctl">
+                    <input type="checkbox" name="broadcastMode" id="broadcastMode" value="1">
+                </div>
+            </div>
+            <div class="ui-row">
+                <label class="ui-label" for="defSeek">同步偏移</label>
+                <div class="ui-ctl">
+                    <input type="number" name="defSeek" id="defSeek" placeholder="毫秒，越大越早播放">
+                </div>
+            </div>
+            <p class="ui-hint">
+                建议服务设置-10左右，客户端默认0，再调大性能差的设备，客户端可能需要开启唤醒锁　<a href="/echo?msg=SEEK">尝试对齐</a>
+            </p>
+
+            <div class="ui-sep"></div>
+
+            <div class="ui-row">
+                <label class="ui-label" for="smallWeekDate">下一次小周日期</label>
+                <div class="ui-ctl">
+                    <input type="number" name="smallWeekDate" id="smallWeekDate" placeholder="yyyymmdd">
+                </div>
+            </div>
+            <p class="ui-hint">
+                例如2026年3月21日周六这天是小周，需要上班，输入20260321，双休请留空<br>
+                输入的日期 &gt; 国家节假日 &gt; 大小周 &gt; 普通周六日<br>
+                第二天0点这个日期会自动更新为下一个小周的日期，遇到法定节假日和调休补班，小周会顺延一周
+            </p>
+
+            <div class="ui-row ui-row-end">
+                <div class="ui-ctl">
+                    <button type="submit">保存设置</button>
+                </div>
+            </div>
+
+            <div id="weatherMsg">请打开浏览器的JavaScript功能</div>
+            <p class="ui-hint">
+                <a href="/getWeather">测试获取天气</a>-&gt;<a href="/downWeather">下载天气音频</a>-&gt;<a href="/play?url=http://127.0.0.1:8080/weather.mp3">播放天气音频</a>
+            </p>
+        </form>
+
+        <form class="card" action="/uploadMp3" method="post" enctype="multipart/form-data">
+            <h2 class="group-title">兜底音乐</h2>
+            <p class="ui-hint">在断网时将使用此音乐播放</p>
+            <div class="field">
+                <div class="ui-ctl">
+                    <input type="file" name="file" id="mp3File" accept="audio/*">
+                </div>
+            </div>
+            <div class="ui-row ui-row-end">
+                <div class="ui-ctl">
+                    <button type="submit">上传</button>
+                </div>
+            </div>
+            <p class="ui-hint">
+                <a href="/play?url=http://127.0.0.1:8080/music.mp3">用音响播放</a>　<a href="/deleteMp3">删除</a>　<a href="/music.mp3">下载(长按/右键另存为)</a>
+            </p>
+        </form>
+
+        <form class="card" action="/uploadCfg" method="post" enctype="multipart/form-data">
+            <h2 class="group-title">备份与恢复</h2>
+            <p class="ui-hint">包含闹钟设置和已播放的音乐</p>
+            <div class="field">
+                <div class="ui-ctl">
+                    <input type="file" name="file" id="cfgFile">
+                </div>
+            </div>
+            <div class="ui-row ui-row-end">
+                <div class="ui-ctl">
+                    <button type="submit">上传配置</button>
+                </div>
+            </div>
+            <p class="ui-hint">
+                <a href="/cfg.json">下载配置(长按/右键另存为)</a>
+            </p>
+        </form>
+
+        <div class="box">
+            <h2 class="group-title">闹钟播放记录</h2>
+            <div id="info">请打开浏览器的JavaScript功能</div>
+        </div>
+    </div>
+    <script>
+        document.getElementById('alarmForm').addEventListener('submit', function(e) {
+            // 获取所有选中的checkbox
+            var checkboxes = document.querySelectorAll('input[name="type2"]:checked');
+            var selectedValues = [];
+
+            for (var i = 0; i < checkboxes.length; i++) {
+                selectedValues.push(checkboxes[i].value);
+                checkboxes[i].checked = false;
+            }
+
+            // 如果有日期输入，添加到值中（提交以输入框为准，先规范化成 mmdd 四位）
+            var dateInput = document.querySelector('input[name="datemmdd"]');
+            dateInput.value = calNormalize(dateInput.value);
+            if (dateInput.value) {
+                selectedValues.push(dateInput.value);
+                dateInput.value = '';
+            }
+
+            // 将值用逗号连接并设置到隐藏字段
+            document.getElementById('alarmtype').value = selectedValues.join(',');
+            // /addAlarm 会 history.go(-1) 回来，可能命中 bfcache，把日历状态一起清掉
+            calReset();
+        });
+        function getCityCode() {
+            var xhr = new XMLHttpRequest();
+            var inp = document.getElementById('weatherCityCode')
+            xhr.open('GET', '/getWeatherCityCode?q=' + inp.value, true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState == 4 && xhr.status == 200) {
+                    inp.value = xhr.responseText
+                }
+            }
+            xhr.send();
+        }
+        /* ---------- 指定日期日历（纯 ES5，兼容 iOS 7） ----------
+           选中的日期一律用 4 位 MMDD 存，和 Go 侧 now.Format("0102") 对齐 */
+        var calSel = {};        // {'1105': true} 以 MMDD 为 key，天生去重
+        var calLockMonth = 0;   // 0 = 未锁月，点了第一个日期后锁定
+        var calLockYear = 0;    // 锁定的年份，只影响标题显示
+        var calViewYear = 0;
+        var calViewMonth = 0;   // 1-12（Date.getMonth() 是 0-11）
+        var calOpen = false;
+
+        function calPad2(n) {
+            return n < 10 ? '0' + n : '' + n;
+        }
+
+        function calDaysInMonth(y, m) {
+            if (m === 2) {
+                return ((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0) ? 29 : 28;
+            }
+            if (m === 4 || m === 6 || m === 9 || m === 11) { return 30; }
+            return 31;
+        }
+
+        // 文本 -> 去重排序后的合法 MMDD 数组
+        function calParse(s) {
+            if (!s) { return []; }
+            // 所有非数字（，、/ - 空格 ； 等）统一当分隔符，顺带省掉 trim
+            var parts = String(s).replace(/[^0-9]+/g, ',').split(',');
+            var seen = {};
+            var out = [];
+            for (var i = 0; i < parts.length; i++) {
+                var t = parts[i];
+                if (!t) { continue; }
+                if (t.length === 8) { t = t.substr(4); }        // 20260803 -> 0803
+                else if (t.length === 3) { t = '0' + t; }       // 803 -> 0803
+                if (t.length !== 4) { continue; }               // 1-2 位分不清是月还是日，丢弃
+                var mm = parseInt(t.substr(0, 2), 10);          // radix 必填，老浏览器会把 '08' 当八进制
+                var dd = parseInt(t.substr(2, 2), 10);
+                if (mm < 1 || mm > 12) { continue; }
+                if (dd < 1 || dd > calDaysInMonth(2000, mm)) { continue; }  // 按闰年校验，允许 0229
+                if (seen[t]) { continue; }
+                seen[t] = true;
+                out.push(t);
+            }
+            out.sort();     // 4 位定长，字典序即时间序
+            return out;
+        }
+
+        function calNormalize(s) {
+            return calParse(s).join(',');
+        }
+
+        function calCount() {
+            return Object.keys(calSel).length;
+        }
+
+        // 这个 MMDD 该落在哪一年显示：平年装不下 0229 就往后找闰年
+        function calYearFor(m, maxDay) {
+            var y = new Date().getFullYear();
+            for (var i = 0; i < 8; i++) {
+                if (maxDay <= calDaysInMonth(y, m)) { return y; }
+                y++;
+            }
+            return new Date().getFullYear();
+        }
+
+        function calRender() {
+            var y = calViewYear, m = calViewMonth;
+            var days = calDaysInMonth(y, m);
+            var lead = new Date(y, m - 1, 1).getDay();  // 0=周日，正好对上首列表头
+            var pre = calPad2(m);
+            var html = '';
+            var now = new Date(), tY = now.getFullYear(), tM = now.getMonth() + 1, tD = now.getDate();
+            // 固定 6 行 = 42 格，翻月时面板高度恒定，按钮不会在手指底下跳走
+            for (var r = 0; r < 6; r++) {
+                html += '<tr>';
+                for (var c = 0; c < 7; c++) {
+                    var d = r * 7 + c - lead + 1;
+                    if (d < 1 || d > days) { html += '<td class="cal-pad"></td>'; continue; }
+                    var mmdd = pre + calPad2(d), cls = 'cal-day';
+                    if (c === 0 || c === 6) { cls += ' cal-we'; }
+                    if (calSel[mmdd]) { cls += ' cal-sel'; }
+                    if (y === tY && m === tM && d === tD) { cls += ' cal-today'; }
+                    html += '<td class="' + cls + '" data-mmdd="' + mmdd + '">' + d + '</td>';
+                }
+                html += '</tr>';
+            }
+            document.getElementById('calBody').innerHTML = html;
+            document.getElementById('calTitle').innerHTML = y + '年' + m + '月';
+        }
+
+        function calWriteBack() {
+            document.getElementById('datemmdd').value = Object.keys(calSel).sort().join(',');
+        }
+
+        function calUpdateNav() {
+            var locked = calLockMonth > 0;
+            document.getElementById('calPrev').disabled = locked;
+            document.getElementById('calNext').disabled = locked;
+        }
+
+        function calUpdateCount() {
+            var c = calCount();
+            document.getElementById('calCount').innerHTML = c > 0 ? '已选 ' + c + ' 天' : '';
+        }
+
+        function calSetNotice(msg) {
+            document.getElementById('calNote').innerHTML = msg || '';
+        }
+
+        // 只重画，不写回输入框（手输同步时用，避免自己改自己）
+        function calRefresh() {
+            calRender();
+            calUpdateNav();
+            calUpdateCount();
+            document.getElementById('calToggle').innerHTML = calOpen ? '收起日历' : '点击展开日历';
+        }
+
+        function calAfterChange() {
+            calWriteBack();
+            calRefresh();
+        }
+
+        function calPick(mmdd) {
+            var m = parseInt(mmdd.substr(0, 2), 10);
+            if (!calLockMonth) {
+                calLockMonth = m;
+                calLockYear = calViewYear;
+            }
+            if (m !== calLockMonth) { return; }     // 双保险：锁月后不该出现别的月份
+            if (calSel[mmdd]) { delete calSel[mmdd]; } else { calSel[mmdd] = true; }
+            if (calCount() === 0) { calLockMonth = 0; }     // 全取消即自动解锁
+            calSetNotice('');
+            calAfterChange();
+        }
+
+        function calInvert() {
+            var days = calDaysInMonth(calViewYear, calViewMonth);
+            var pre = calPad2(calViewMonth);
+            for (var d = 1; d <= days; d++) {
+                var k = pre + calPad2(d);
+                if (calSel[k]) { delete calSel[k]; } else { calSel[k] = true; }
+            }
+            if (calCount() > 0) {
+                calLockMonth = calViewMonth;
+                calLockYear = calViewYear;
+            } else {
+                calLockMonth = 0;
+            }
+            calSetNotice('');
+            calAfterChange();
+        }
+
+        function calClear() {
+            document.getElementById('datemmdd').value = '';
+            calSel = {};
+            calLockMonth = 0;
+            calLockYear = 0;
+            calSetNotice('');
+            calAfterChange();
+        }
+
+        // 清空选择、解锁、收起面板（提交后也调，防 bfcache 带着旧高亮回来）
+        function calReset() {
+            var now = new Date();
+            calSel = {};
+            calLockMonth = 0;
+            calLockYear = 0;
+            calOpen = false;
+            calViewYear = now.getFullYear();
+            calViewMonth = now.getMonth() + 1;
+            document.getElementById('datemmdd').value = '';
+            document.getElementById('calPanel').style.display = 'none';
+            calSetNotice('');
+            calRefresh();
+        }
+
+        function calNav(step) {
+            if (calLockMonth) { return; }
+            var y = calViewYear, m = calViewMonth + step;
+            if (m < 1) { m = 12; y--; } else if (m > 12) { m = 1; y++; }
+            if (y < 1970 || y > 2100) { return; }
+            calViewYear = y;
+            calViewMonth = m;
+            calRefresh();
+        }
+
+        function calToggle() {
+            calOpen = !calOpen;
+            document.getElementById('calPanel').style.display = calOpen ? 'block' : 'none';
+            if (calOpen) {
+                var inp = document.getElementById('datemmdd');
+                calSyncText(inp.value);
+                if (inp.blur) { inp.blur(); }   // 先收键盘，免得第一次点击被系统吞掉
+            }
+            calRefresh();
+        }
+
+        // 从输入框文本反推状态：只读，绝不回写
+        function calSyncText(s) {
+            var list = calParse(s);
+            calSel = {};
+            if (!list.length) {
+                calLockMonth = 0;
+                calLockYear = 0;
+                calSetNotice('');
+                calRefresh();
+                return;
+            }
+            var m0 = parseInt(list[0].substr(0, 2), 10);
+            var same = true, maxDay = 0;
+            for (var i = 0; i < list.length; i++) {
+                if (parseInt(list[i].substr(0, 2), 10) !== m0) { same = false; }
+                var d = parseInt(list[i].substr(2, 2), 10);
+                if (d > maxDay) { maxDay = d; }
+            }
+            if (!same) {
+                // 日历一次只能显示一个月：不动输入框，只提示，避免静默抹掉别的月份
+                calLockMonth = 0;
+                calLockYear = 0;
+                calViewYear = new Date().getFullYear();
+                calViewMonth = m0;
+                calSetNotice('输入里有多个不同月份，日历一次只能显示一个月；点日历会用日历的选择覆盖输入框');
+                calRefresh();
+                return;
+            }
+            for (var j = 0; j < list.length; j++) { calSel[list[j]] = true; }
+            calLockMonth = m0;
+            calLockYear = calYearFor(m0, maxDay);
+            calViewYear = calLockYear;
+            calViewMonth = m0;
+            calSetNotice('');
+            calRefresh();
+        }
+
+        function calOnInput(e) {
+            var inp = document.getElementById('datemmdd');
+            var type = e && e.type, bad = '';
+            if (type === 'blur' || type === 'change') {
+                var norm = calNormalize(inp.value);
+                if (norm) { inp.value = norm; }
+                else if (inp.value) { bad = '无法识别的日期（需要 mmdd 四位）：' + inp.value; }
+            }
+            if (!calOpen) { return; }
+            calSyncText(inp.value);
+            if (bad) { calSetNotice(bad); }
+        }
+
+        function calBodyClick(e) {
+            var ev = e || window.event;
+            var t = ev.target || ev.srcElement;
+            while (t && t !== this) {
+                if (t.tagName && t.tagName.toUpperCase() === 'TD') {
+                    var mmdd = t.getAttribute('data-mmdd');
+                    if (mmdd) { calPick(mmdd); }
+                    return;
+                }
+                t = t.parentNode;
+            }
+        }
+
+        function calInit() {
+            var now = new Date();
+            calViewYear = now.getFullYear();
+            calViewMonth = now.getMonth() + 1;
+            document.getElementById('calBody').addEventListener('click', calBodyClick, false);
+            var inp = document.getElementById('datemmdd');
+            inp.addEventListener('input', calOnInput, false);
+            inp.addEventListener('change', calOnInput, false);
+            inp.addEventListener('blur', calOnInput, false);
+            calRefresh();
+        }
+        calInit();
+
+        // 打开页面后请求cfg.json，获取闹钟列表
+        function getAlarms() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/cfg.json?t=' + Date.now(), true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState == 4 && xhr.status == 200) {
+                    var d = JSON.parse(xhr.responseText);
+                    document.getElementById('volDefault').value = d.volDefault;
+                    document.getElementById('volAlarm').value = d.volAlarm;
+                    document.getElementById('nePlayListId').value = d.nePlayListId;
+                    document.getElementById('defPlayListId').value = d.defPlayListId;
+                    document.getElementById('tz').value = d.tz;
+                    document.getElementById('weatherCityCode').value = d.weatherCityCode;
+                    document.getElementById('weatherUpdate').value = d.weatherUpdate;
+                    document.getElementById('wakelock').checked = d.wakelock
+                    document.getElementById('alarmTime').value = d.alarmTime
+                    document.getElementById('muteWhenStop').checked = d.muteWhenStop
+                    document.getElementById('musicQuality').value = d.musicQuality
+                    document.getElementById('musicApi').value = d.musicApi || 'netease'
+                    document.getElementById('savePath').value = d.savePath
+                    document.getElementById('cacheLimit').value = d.cacheLimit || 1024
+                    document.getElementById('broadcastMode').checked = d.broadcastMode
+                    document.getElementById('defSeek').value = d.defSeek
+                    document.getElementById('smallWeekDate').value = d.smallWeekDate
+                    var html = '<tr><th>时分</th><th>类型</th><th>操作</th></tr>';
+                    // 用下标循环，for...of 在 iOS 7 上会整个脚本语法错误
+                    var hhmmKeys = Object.keys(d.alarm);
+                    for (var k = 0; k < hhmmKeys.length; k++) {
+                        var hhmm = hhmmKeys[k];
+                        var typeList = d.alarm[hhmm] || [];
+                        var typeStr = ""
+                        for(var i=0; i< typeList.length; i++) {
+                            var t = typeList[i]
+                            typeStr += (t == 1 ? '法定工作日' : t == 2 ? '法定休息日' : t == 3 ? '一次' : t == 4 ? '每天' : t == 5 ? '周日' : t == 6 ? '周一' : t == 7 ? '周二' : t == 8 ? '周三' : t == 9 ? '周四' : t == 10 ? '周五' : t == 11 ? '周六' : String(t).substr(0,2)+'月'+String(t).substr(2)) + '<br>';
+                        }
+                        html += '<tr><td>' + hhmm + '</td><td>' + typeStr + '</td><td><form action="/delAlarm"><button class="red btn-sm" type="submit" name="hhmm" value="' + hhmm + '">删除</button></form></td></tr>';
+                    }
+                    document.getElementById('alarms').innerHTML = html;
+                    html = '当前已播放 ' + d.nePlayed.length + ' 首<br>';
+                    for (var i = d.nePlayed.length - 1; i >=0; i--) {
+                        html += '<a href="https://music.163.com/#/song?id=' + d.nePlayed[i] + '">' + d.nePlayed[i] + '</a><br>';
+                    }
+                    document.getElementById('info').innerHTML = html;
+                    html = '昨天 '+ d.lastday + ' ' + d.lastdayFc + '到' + d.lastdayFd + '度<br>今天 '+ d.today + ' ' + d.todayFc + '到' + d.todayFd + '度';
+                    document.getElementById('weatherMsg').innerHTML = html;
+
+                }
+            }
+            xhr.send();
+        }
+        window.onload = getAlarms;
+        // window.onfocus = getAlarms;
+        window.onpageshow = function(event) {
+            if (event.persisted || window.performance && window.performance.navigation.type == 2) {
+                getAlarms();
+            }
+        }
+    </script>
+</body>
+</html>

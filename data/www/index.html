@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="format-detection" content="telephone=no" />
+    <title>工作咩闹钟</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        /* 模式相关的按钮先藏起来，等 /status 返回后再显示，避免闪一下 */
+        .app-only, .linux-only { display: none; }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <header class="page-head">
+            <img class="brand" src="/favicon.ico" width="44" height="44" alt="">
+            <div class="page-head-text">
+                <h1 class="page-title">工作咩闹钟<span class="ver" id="ver"></span></h1>
+            </div>
+        </header>
+
+        <div class="status" id="statusMsg"></div>
+
+        <section class="card card-flush">
+            <div class="btn-row btn-row-3">
+                <form action="/stop">
+                    <button type="submit">停止</button>
+                </form>
+                <form action="/pause">
+                    <button type="submit">暂停</button>
+                </form>
+                <form action="/resume">
+                    <button type="submit">恢复播放</button>
+                </form>
+            </div>
+            <div class="btn-row">
+                <form action="/volm">
+                    <button type="submit">音量减</button>
+                </form>
+                <form action="/volp">
+                    <button type="submit">音量加</button>
+                </form>
+                <form action="/prev">
+                    <button type="submit">上一首</button>
+                </form>
+                <form action="/next">
+                    <button type="submit">下一首</button>
+                </form>
+            </div>
+        </section>
+
+        <form class="card line-card" action="/play" method="get" id="playUrlForm" onsubmit="return playurl()">
+            <div class="line">
+                <span class="line-btn"><button type="submit">播放url</button></span>
+                <span class="line-input"><input type="text" name="url" id="playUrl" value="http://127.0.0.1:8080/static/music.mp3"></span>
+                <span class="line-tail"><label>循环 <input type="checkbox" name="loopMode" value="0"></label></span>
+            </div>
+        </form>
+
+        <form class="card line-card" action="/playlist" method="get" id="playlistForm" onsubmit="return playlist()">
+            <div class="line">
+                <span class="line-btn"><button type="submit">播放歌单</button></span>
+                <span class="line-input"><input type="text" name="id" id="playlistId" placeholder="歌单id或分享链接" value="21777546"></span>
+                <span class="line-tail line-tail-wide">
+                    <select name="random">
+                        <option value="0">顺序播放</option>
+                        <option value="1">随机播放</option>
+                    </select>
+                </span>
+            </div>
+        </form>
+
+        <form class="card line-card" action="/playmusic" method="get" id="playmusicForm" onsubmit="return playmusic()">
+            <div class="line">
+                <span class="line-btn"><button type="submit">播放歌曲</button></span>
+                <span class="line-input"><input type="text" name="id" id="playmusicId" placeholder="歌曲id或分享链接" value="2604307454"></span>
+                <span class="line-tail"><label>循环 <input type="checkbox" name="loopMode" id="loopMode" value="0"></label></span>
+            </div>
+        </form>
+
+        <form class="card line-card" action="/timeStop" method="get" id="timeStopForm">
+            <div class="line">
+                <span class="line-btn"><button type="submit">定时停止</button></span>
+                <span class="line-input"><input type="number" name="min" id="timeStop" value="30.0" min="0" step="0.5"></span>
+                <span class="line-tail">分钟后</span>
+            </div>
+        </form>
+
+        <nav class="page-nav">
+            <a href="/restart">重启</a>
+            <a href="javascript:checkUpdate()">检查更新</a>
+            <a href="/alarm.html">闹钟设置</a>
+            <a href="/playlist.html">我的歌单</a>
+            <a class="app-only" href="/echo?msg=SCREENON">亮屏</a>
+            <a class="app-only" href="/echo?msg=SCREENOFF">熄屏</a>
+            <a class="app-only" href="javascript:location.href='//'+location.hostname+':8880'">查看摄像头</a>
+            <a class="linux-only" href="/eq.html">均衡器</a>
+        </nav>
+    </div>
+    <script>
+        function playlist() {
+            var pl = document.getElementById('playlistId').value
+            saveItem('lastPlayList', pl);
+            return true;
+        }
+        function playmusic() {
+            var pl = document.getElementById('playmusicId').value
+            saveItem('lastPlayMusic', pl);
+            return true;
+        }
+        function playurl() {
+            saveItem('lastPlayUrl', document.getElementById('playUrl').value);
+        }
+        // iOS 无痕模式下 localStorage 会直接抛异常，读写都要包起来
+        function saveItem(key, value) {
+            try {
+                localStorage.setItem(key, value);
+            } catch (e) {}
+        }
+        function readItem(key) {
+            try {
+                return localStorage.getItem(key);
+            } catch (e) {
+                return null;
+            }
+        }
+        // ESP32 版没有"检查服务器有没有新版本"，改成手动上传固件（OTA）
+        function checkUpdate() {
+            var el = document.getElementById('statusMsg');
+            el.innerHTML = '固件升级：<a href="/checkUpdate">打开固件上传页面</a>' +
+                           '<br><span style="opacity:.6">上传 .pio/build/alphapi/firmware.bin，写完自动重启</span>';
+        }
+        // 状态信息
+        function getStatus() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/status?t=' + Date.now(), true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState == 4 && xhr.status == 200) {
+                    var d = JSON.parse(xhr.responseText);
+                    // 按运行模式显示按钮：App 下才有亮屏/熄屏/摄像头，Linux 下才有均衡器
+                    var appOnly = document.querySelectorAll('.app-only');
+                    var linuxOnly = document.querySelectorAll('.linux-only');
+                    for (var i = 0; i < appOnly.length; i++) {
+                        appOnly[i].style.display = d.isApp ? 'inline-block' : 'none';
+                    }
+                    for (var j = 0; j < linuxOnly.length; j++) {
+                        linuxOnly[j].style.display = d.isApp ? 'none' : 'inline-block';
+                    }
+                    var nowText = d.nowPlaying ? d.nowPlaying : '正在播放';
+                    var msg = (d.batLevel ? '电量 ' + d.batLevel.trim() + '%<br>' : '')
+                    + (d.stopUnix ? '将在 ' + new Date(d.stopUnix*1000).toLocaleString('af').split(' ')[1] + ' 后停止<br>' : '')
+                    + (d.skipAlarm ? '将跳过 ' + d.skipAlarm + ' 次闹钟<br>' : '')
+                    + (d.isStop ? '已停止播放' : d.isPaused ? '已暂停播放' : (d.isAlarm ? '闹钟 ' : '')
+                    + (d.playList && d.playList.length > 0 ? '待播放 '+d.playList.length + ' 首 ' : '')
+                    + (d.nowId ? '<a href="https://music.163.com/#/song?id=' + d.nowId + '">' + nowText + '</a>' : d.nowUrl ? '<a href="' + d.nowUrl + '">' + nowText + '</a>' : ''));
+                    document.getElementById('statusMsg').innerHTML = msg;
+                    if (d.version) {
+                        document.getElementById('ver').innerHTML = 'v' + d.version;
+                    }
+                }
+            }
+            xhr.send();
+
+            var lastPlayUrl = readItem('lastPlayUrl')
+            if (lastPlayUrl) {
+                document.getElementById('playUrl').value = lastPlayUrl
+            }
+            var lastPlayList = readItem('lastPlayList')
+            if (lastPlayList) {
+                document.getElementById('playlistId').value = lastPlayList
+            }
+            var lastPlayMusic = readItem('lastPlayMusic')
+            if (lastPlayMusic) {
+                document.getElementById('playmusicId').value = lastPlayMusic
+            }
+        }
+        window.onload = getStatus;
+        // window.onfocus = getStatus;
+        window.onpageshow = function(event) {
+            if (event.persisted || window.performance && window.performance.navigation.type == 2) {
+                getStatus();
+            }
+        }
+    </script>
+</body>
+</html>

@@ -15,9 +15,15 @@
 ，用 esptool 一键烧录：
 
 ```bash
-esptool.py --chip esp32s3 --port /dev/cu.usbmodemAlphaPi_ONE2 --baud 921600 \
-    write_flash 0x0 bootloader.bin 0x10000 firmware.bin 0x210000 littlefs.bin
+esptool.py --chip esp32s3 --port /dev/cu.usbmodemAlphaPi_ONE2 --baud 115200 \
+    write_flash 0x0      bootloader.bin \
+                0x8000   partitions.bin \
+                0x10000  firmware.bin \
+                0x520000 littlefs.bin \
+                --flash_size 8MB
 ```
+
+看到雪花屏就好连Wi-Fi配网了，搜索 `workdayAlarmClock`
 
 ## 从源码编译
 

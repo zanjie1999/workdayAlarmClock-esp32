@@ -29,6 +29,8 @@ struct AppConfig {
     String musicQuality;    // standard / higher / exhigh / lossless / hires
     String musicApi;        // 目前只实现 netease
     String cookie;          // 网易云 cookie（可为空）
+    String savePath;        // 缓存目录（对应 Go 的 savePath），空 = 完全不缓存；
+                            // 设置后歌单缓存 <savePath>/playlist.json、本地 mp3 筛选都指向它
     String smallWeekDate;   // 下一次小周日期 yyyymmdd
     String wifiSsid;
     String wifiPass;

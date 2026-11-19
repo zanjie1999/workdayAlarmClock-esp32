@@ -38,6 +38,7 @@ AppConfig::AppConfig()
     muteWhenStop = false;
     musicQuality = "standard";
     musicApi = "netease";
+    savePath = "";
     lastEpoch = 0;
 }
 
@@ -343,6 +344,7 @@ static void load_json()
     if (member_str(ms, "musicQuality", &v)) g_cfg.musicQuality = v;
     if (member_str(ms, "musicApi", &v)) g_cfg.musicApi = v;
     if (member_str(ms, "cookie", &v)) g_cfg.cookie = v;
+    if (member_str(ms, "savePath", &v)) g_cfg.savePath = v;
     if (member_str(ms, "smallWeekDate", &v)) g_cfg.smallWeekDate = v;
     if (member_str(ms, "tz", &v)) g_cfg.tz = v.toInt();
     if (member_str(ms, "alarmTime", &v)) g_cfg.alarmTime = v.toFloat();
@@ -356,7 +358,7 @@ static void load_json()
     static const char *owned[] = {"volDefault",   "volAlarm",   "alarm",     "nePlayListId",
                                   "defPlayListId", "nePlayed",  "tz",        "alarmTime",
                                   "muteWhenStop", "musicQuality", "musicApi", "cookie",
-                                  "smallWeekDate"};
+                                  "savePath",     "smallWeekDate"};
     s_extra = "";
     for (size_t i = 0; i < ms.size(); i++) {
         bool own = false;
@@ -428,6 +430,8 @@ void cfg_save()
     j += json_esc(g_cfg.cookie);
     j += "\",\"smallWeekDate\":\"";
     j += json_esc(g_cfg.smallWeekDate);
+    j += "\",\"savePath\":\"";
+    j += json_esc(g_cfg.savePath);
     j += '"';
     if (s_extra.length()) {
         j += ',';

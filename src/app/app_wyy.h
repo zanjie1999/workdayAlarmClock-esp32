@@ -4,9 +4,9 @@
 #include <Arduino.h>
 #include <vector>
 
-#define WYY_PLAYLIST_CACHE "/music/playlist.json"
-
-// 歌单详情。接口不通时自动回落 /music/playlist.json 里的缓存。
+// 歌单缓存只在设置了 savePath 时才启用（对齐 Go 的语义：savePath 空 = 不缓存）：
+//   <savePath>/playlist.json
+// 没设置 savePath 时 wyy_playlist 只走在线，失败不落盘也不读盘。
 bool wyy_playlist(const String &id, std::vector<String> *ids, String *name);
 bool wyy_playlist_cached(const String &id, std::vector<String> *ids, String *name);
 bool wyy_has_cache();

@@ -294,11 +294,30 @@ static bool parse_playlist(const char *js, std::vector<String> *ids, String *nam
     return ids->size() > 0;
 }
 
+// ---------------------------------------------------------------- 歌单缓存
+
+// 缓存路径：savePath 为空返回空串 = 缓存功能整体关闭（对齐 Go 的 savePath 语义）
+static String playlist_cache_path()
+{
+    String save;
+    {
+        CfgLock lk;
+        save = g_cfg.savePath;
+    }
+    if (!save.length()) return String();
+    while (save.length() > 1 && save.endsWith("/")) save.remove(save.length() - 1);
+    if (save == "/" || save == ".") return String();
+    return save + "/playlist.json";
+}
+
 static void save_cache(const String &id, const String &name, const std::vector<String> &ids)
 {
-    File f = LittleFS.open(WYY_PLAYLIST_CACHE, "w");
+    const String path = playlist_cache_path();
+    if (!path.length()) return;  // 没设缓存目录，不写任何东西
+
+    File f = LittleFS.open(path, "w");
     if (!f) {
-        ALOG("wyy", "歌单缓存写入失败");
+        ALOG("wyy", "歌单缓存写入失败 %s", path.c_str());
         return;
     }
     f.print("{\"id\":\"");
@@ -318,14 +337,16 @@ static void save_cache(const String &id, const String &name, const std::vector<S
     }
     f.print("]}");
     f.close();
-    ALOG("wyy", "歌单缓存已更新 %s (%u 首)", WYY_PLAYLIST_CACHE, (unsigned)ids.size());
+    ALOG("wyy", "歌单缓存已更新 %s (%u 首)", path.c_str(), (unsigned)ids.size());
 }
 
-bool wyy_has_cache() { return LittleFS.exists(WYY_PLAYLIST_CACHE); }
+bool wyy_has_cache() { return playlist_cache_path().length() && LittleFS.exists(playlist_cache_path()); }
 
 bool wyy_playlist_cached(const String &id, std::vector<String> *ids, String *name)
 {
-    File f = LittleFS.open(WYY_PLAYLIST_CACHE, "r");
+    const String path = playlist_cache_path();
+    if (!path.length()) return false;
+    File f = LittleFS.open(path, "r");
     if (!f) return false;
     String js = f.readString();
     f.close();

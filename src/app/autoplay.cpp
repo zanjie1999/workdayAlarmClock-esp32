@@ -74,13 +74,22 @@ int autoplay_scan_dir(const String &dir_in, SongList *out)
     return (int)all.size();
 }
 
-// 歌单里的 id 换成 /music/<id>.mp3，只有真存在缓存才收
+// 歌单里的 id 换成 <savePath>/<id>.mp3，只有真存在缓存才收。
+// savePath 为空时整个函数是 no-op（对齐 Go：没设缓存目录就没有本地缓存可选）
 static void build_cached(const std::vector<String> &ids, bool ignore_played, SongList *out)
 {
+    String save;
+    {
+        CfgLock lk;
+        save = g_cfg.savePath;
+    }
+    if (!save.length()) return;
+    while (save.length() > 1 && save.endsWith("/")) save.remove(save.length() - 1);
+
     for (size_t i = 0; i < ids.size(); i++) {
         const String &id = ids[i];
         if (!ignore_played && cfg_was_played(id)) continue;
-        String p = "/music/" + id + ".mp3";
+        String p = save + "/" + id + ".mp3";
         if (LittleFS.exists(p)) out->push(p);
     }
 }

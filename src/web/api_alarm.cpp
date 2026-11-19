@@ -446,7 +446,9 @@ String cfg_json()
     j += "\",\"musicApi\":\"";
     j += jesc(g_cfg.musicApi);
     // Go 版回显时把 cookie 清掉，防止局域网里直接看到登录态
-    j += "\",\"cookie\":\"\",\"savePath\":\"\",\"cacheLimit\":1024"
+    j += "\",\"cookie\":\"\",\"savePath\":\"";
+    j += jesc(g_cfg.savePath);
+    j += "\",\"cacheLimit\":1024"
          ",\"broadcastMode\":false,\"defSeek\":\"0\",\"smallWeekDate\":\"";
     j += jesc(g_cfg.smallWeekDate);
     j += "\",\"port\":80,\"eq\":";
@@ -527,7 +529,25 @@ esp_err_t h_update_cfg(httpd_req_t *req)
             g_cfg.smallWeekDate = v;
             changed = true;
         }
-        // 其余参数（weatherCityCode / wakelock / savePath / cacheLimit /
+        // 缓存目录（对齐 Go router.go 的 savePath）：
+        //   空串 = 关闭缓存（歌单缓存 / 本地 mp3 筛选全部不生效）
+        //   "/"  或 "./" -> 规范成 "/music"
+        //   其余规范化成绝对路径（去尾部斜杠），不存在就建一层
+        if (qhas(req, "savePath", &v)) {
+            v = appstr::trim(v);
+            while (v.length() > 1 && v.endsWith("/")) v.remove(v.length() - 1);
+            if (v == "/" || v == "." || v == "./") v = "/music";
+            if (!v.isEmpty() && !v.startsWith("/")) v = "/" + v;
+            if (g_cfg.savePath != v) {
+                g_cfg.savePath = v;
+                changed = true;
+                if (!v.isEmpty()) {
+                    if (!LittleFS.exists(v) && !LittleFS.mkdir(v))
+                        ALOG("cfg", "缓存目录创建失败 %s", v.c_str());
+                }
+            }
+        }
+        // 其余参数（weatherCityCode / wakelock / cacheLimit /
         // broadcastMode / defSeek / weatherUpdate）ESP32 侧没有实现，忽略；
         // 它们由 app_config.cpp 的 s_extra 原样保留在 json 里，不会丢。
     }

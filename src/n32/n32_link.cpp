@@ -1,17 +1,16 @@
 // n32_link.cpp -- N32 音频协处理器链路（UART1, 8N1）
 //
-// 协议（手册 §6.2/6.3，厂商驱动的 n32_audio.py / keys.py 与之一致）：
-//   写寄存器 0x90 [addr] [len] [data...] [cksum]  -> 回 0x91 [addr] [cksum]
+// 协议（✅ v5 手册 §3.2，与参考工程 alphapi_one_xiaozhi_car_radio codec 一致）：
+//   写寄存器 0x90 [addr] [len] [data...] [cksum]  -> 回 0x91 [addr] [resp]
+//     resp = N32 实际接收的数据字节数（背压流控的唯一依据，不是校验和）
 //   读寄存器 0x80 [addr] [len]                    -> 回 0x81 [addr] [len] [data...] [cksum]
-//   cksum = 整帧所有字节相加 & 0xFF
+//   cksum = 除最后一字节外整帧累加 & 0xFF
 //
-// 波特率是这次排查的重点：厂商 MicroPython 驱动（drivers/test_all.py、
-// drivers/test_keys.py）全部用 460929，手册说原板/通用版 460929、小智固件 1Mbps，
-// 且"芯片可能自适应"。所以这里不再写死，启动时把候选波特率 × TX/RX 正反接
-// 都探一遍，谁先回来用谁。
+// 波特率固定 N32_BAUD（460800，参考工程实机实测应答值），不探测。
 //
-// 另一处关键：只有 0x00 / 0x11 是手册标了可读的寄存器，0x14 只写。
-// 之前拿 0x14 当探测目标，即使波特率对也可能永远读不回来。
+// 播放起播序列照抄参考工程 ConfigureOutputLocked：
+//   静默窗口(重配时) -> 0x14 音量(0~6 硬件档) -> 0x10/0 停录 -> 44 字节 WAV 头 -> 推 PCM
+// 每块 0x15 等 0x91 应答做流控；头只在首次（或兜底重配时）发一次。
 #include "../n32_link.h"
 #include "../board_config.h"
 
@@ -19,6 +18,7 @@
 #include <driver/uart.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -26,22 +26,31 @@
 #define N32_RX_BUF 4096
 #define N32_TX_BUF 4096
 
-// 编译期一键把 TX/RX 对调（默认按手册：TX=GPIO3 ESP32->N32，RX=GPIO0 N32->ESP32）。
-// 运行期 n32_init() 也会自动试另一种接法，这里是给怀疑接反时省事的硬开关。
-#ifndef N32_SWAP_TX_RX
-#define N32_SWAP_TX_RX 0
-#endif
-
-#define N32_ACK_TIMEOUT_MS 8    // 单块 ACK 超时：发 200B 约 4.4ms + ACK 回传几 ms。厂商驱动是 send+300us+read(3)，等效非阻塞等 ACK；这里 8ms 足够且不拖实时
+// ✅ 参考工程（alphapi_one_xiaozhi_car_radio）实测对齐：
+//   * 控制命令/流写应答超时 80ms —— 只是"等不到应答"时的失败上限，
+//     正常路径几 ms 就回，不会被它拖慢
+//   * 读寄存器/按键 20ms
+#define N32_ACK_TIMEOUT_MS 80
 #define N32_READ_TIMEOUT_MS 20
-#define N32_PROBE_TIMEOUT_MS 30 // 单次探测等应答的上限，别把启动卡住
-#define N32_PROBE_WINDOW_MS 2000
 
 static bool s_inited = false;
 static bool s_present = false;
 static bool s_record_on = false;
 static bool s_ack_required = true;  // 芯片若只收不回 ACK，第一次写失败后自动关掉
 static SemaphoreHandle_t s_mutex = nullptr;
+
+// ── 播放流状态（对齐参考工程 codec 的 output_configured_ / ack_timeouts_）──
+// N32 靠 44 字节 WAV 头配置播放通路（原厂 play() 从文件第 0 字节连头一起推）。
+// 头的长度字段是 0xFFFFFFFF（流式无限长），N32 停在放音态，参数一直有效，
+// 所以头只在第一次（或链路兜底重配时）发一次，后续流接续跳过。
+static bool s_stream_configured = false;
+// 连续收不到 0x91 写应答的次数：>=4 说明 N32 其实不认这条流，下块前完整重配；
+// >=20 判定链路死了，中止本次写入。
+static uint32_t s_ack_timeouts = 0;
+// 最后一次成功写 PCM 的时刻（重配前的 400ms 静默窗口用）
+static uint32_t s_last_pcm_ms = 0;
+// 音量 0~100（内部映射成 0~6 硬件档，见 n32_set_volume）
+static uint8_t s_volume_pct = 60;
 
 static int s_tx_pin = PIN_N32_TX;
 static int s_rx_pin = PIN_N32_RX;
@@ -141,32 +150,39 @@ static void drain_locked(void)
     }
 }
 
-// 等写命令的 0x91 addr cksum。接收侧可能混进上一次的迟到响应，
+// 等写命令的 0x91 addr resp。✅ v5 手册 §3.2：写响应固定 3 字节
+// [0x91][addr][resp]，第 3 字节 = N32 实际接收的数据字节数（不是校验和！）。
+// 这是背压流控的唯一依据。接收侧可能混进上一次的迟到响应，
 // 所以逐字节找帧头，不匹配就丢掉重找，不做 flush。
-
-static bool wait_ack_locked(uint8_t addr, uint32_t timeout_ms)
+// 返回 resp 字节（>=0 成功，-1 超时）。
+static int wait_ack_locked(uint8_t addr, uint32_t timeout_ms)
 {
     uint32_t deadline = millis() + timeout_ms;
     for (;;) {
         uint8_t h;
-        if (!get_byte(&h, deadline)) return false;
+        if (!get_byte(&h, deadline)) return -1;
         if (h != 0x91) continue;
 
-        uint8_t a, cs;
-        if (!get_byte(&a, deadline)) return false;
-        if (!get_byte(&cs, deadline)) return false;
+        uint8_t a, r;
+        if (!get_byte(&a, deadline)) return -1;
+        if (!get_byte(&r, deadline)) return -1;
         if (a != addr) continue;
-        if (cs != (uint8_t)(0x91 + a)) continue;  // 校验错就继续找，不要整帧放弃
-        uint8_t frame[3] = {0x91, a, cs};
+        uint8_t frame[3] = {0x91, a, r};
         log_rx(frame, sizeof(frame));
-        return true;
+        return r;
     }
 }
 
-// 写寄存器：0x90 addr len data... cksum
-static bool write_reg_locked(uint8_t addr, const uint8_t *data, uint8_t len,
-                             uint32_t timeout_ms)
+// 写寄存器：0x90 addr len data... cksum（仅控制命令 0x10/0x14 用；
+// 音频流走 write_audio_chunk_locked，不能在这里清 RX）
+// 返回 N32 实际接收的字节数（resp[2]），-1 = 超时/失败。
+static int write_reg_locked(uint8_t addr, const uint8_t *data, uint8_t len,
+                            uint32_t timeout_ms)
 {
+    // 关键：先清掉推流残留的 0x91 写应答，否则下面读到的是上一条命令的应答
+    //（参考工程 DrainAcksLocked：应答堆积后每条 0x10/0x14 都会读到 91 15 c8 而失败）
+    drain_locked();
+
     uint8_t cmd[3 + 255 + 1];
     cmd[0] = 0x90;
     cmd[1] = addr;
@@ -179,12 +195,12 @@ static bool write_reg_locked(uint8_t addr, const uint8_t *data, uint8_t len,
     cmd[n] = sum;
 
     log_tx(cmd, n + 1);
-    if (uart_write_bytes(N32_UART, (const char *)cmd, n + 1) < 0) return false;
+    if (uart_write_bytes(N32_UART, (const char *)cmd, n + 1) < 0) return -1;
     uart_wait_tx_done(N32_UART, pdMS_TO_TICKS(timeout_ms));
 
     if (!s_ack_required) {
         drain_locked();
-        return true;  // 芯片不发 ACK 时只能认为发出去了
+        return len;  // 芯片不发 ACK 时只能认为发出去了
     }
     return wait_ack_locked(addr, timeout_ms);
 }
@@ -238,66 +254,6 @@ static bool read_reg_locked(uint8_t addr, uint8_t len, uint8_t *out,
     }
 }
 
-// 切引脚 / 切波特率。pinMode 放在 uart_set_pin 之前：GPIO0 是 strapping 脚，
-// 做 RX 时先给个上拉，保证空闲电平为高，避免误触发起始位。
-static esp_err_t apply_cfg(int tx, int rx, uint32_t baud)
-{
-    uart_wait_tx_done(N32_UART, pdMS_TO_TICKS(50));
-    uart_flush_input(N32_UART);
-
-    pinMode(rx, INPUT_PULLUP);
-
-    esp_err_t err = uart_set_pin(N32_UART, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    if (err != ESP_OK) return err;
-    err = uart_set_baudrate(N32_UART, baud);
-    if (err != ESP_OK) return err;
-
-    s_tx_pin = tx;
-    s_rx_pin = rx;
-    s_baud = baud;
-    uart_flush_input(N32_UART);
-    return ESP_OK;
-}
-
-// 发一条读 0x00 的查询，把原始应答收下来并打印（不看校验之前先看有没有字节）。
-// 返回 true 表示收到了 0x81 00 len data cksum 的合法帧。
-static bool probe_locked(uint8_t *buf, size_t *out_n, uint32_t timeout_ms)
-{
-    uint8_t cmd[3] = {0x80, 0x00, 0x01};
-    log_tx(cmd, sizeof(cmd));
-    uart_write_bytes(N32_UART, (const char *)cmd, sizeof(cmd));
-    uart_wait_tx_done(N32_UART, pdMS_TO_TICKS(timeout_ms));
-
-    size_t n = 0;
-    uint32_t deadline = millis() + timeout_ms;
-    if (get_byte(&buf[n], deadline)) {
-        n = 1;
-        // 帧内字节间隔极短，逐字节用 3ms 的短超时收完即可，不要死等整个窗口。
-        while (n < 16) {
-            uint8_t b;
-            if (!get_byte(&b, millis() + 3)) break;
-            buf[n++] = b;
-            if (n >= 5 && buf[0] == 0x81) break;
-            if (n >= 3 && buf[0] == 0x91) break;
-        }
-    }
-    log_rx(buf, n);
-    if (out_n) *out_n = n;
-
-    if (n >= 5 && buf[0] == 0x81 && buf[1] == 0x00) {
-        uint8_t l = buf[2];
-        if (l >= 1 && n >= (size_t)(l + 4)) {
-            uint8_t sum = 0;
-            for (size_t i = 0; i < (size_t)l + 3; i++) sum += buf[i];
-            if (sum == buf[l + 3]) return true;
-            Serial.println("[n32] 收到 0x81 但校验和不对（波特率偏差？）");
-        }
-    } else if (n >= 1 && buf[0] == 0x81) {
-        Serial.printf("[n32] 收到 0x81 00 但长度异常 n=%u\n", (unsigned)n);
-    }
-    return false;
-}
-
 extern "C" {
 
 bool n32_init(void)
@@ -337,63 +293,12 @@ bool n32_init(void)
     uart_flush_input(N32_UART);
     s_inited = true;
 
+    // ✅ 波特率固定 N32_BAUD（460800，参考工程实机实测应答值），不探测。
     // 上电等待：厂商驱动建完 UART 后 sleep 100ms 才发第一帧，这里给足余量。
     delay(150);
-
-    // 候选波特率：460929 是厂商驱动实测值（drivers/n32_audio.py 默认），
-    // 1M 曾导致 N32 卡死 + 系统无响应（实测 1M 下 N32 通信异常），
-    // 回退到 460929（实测稳定）。音频卡顿靠加大缓冲解决，不冒险用 1M。
-    static const uint32_t bauds[] = {460929u, 1000000u, 115200u};
-    const size_t nbaud = sizeof(bauds) / sizeof(bauds[0]);
-
-    uint8_t buf[16];
-    size_t n = 0;
-    int attempt = 0;
-    bool found = false;
-    bool swapped = false;
-    uint32_t t0 = millis();
-
-    // 2 秒窗口内把 3 个波特率 × 正反接法轮着试。
-    while (!found && (uint32_t)(millis() - t0) < N32_PROBE_WINDOW_MS) {
-        for (size_t bi = 0; bi < nbaud && !found; bi++) {
-            for (int k = 0; k < 2 && !found; k++) {
-                int sw = k ^ (N32_SWAP_TX_RX ? 1 : 0);
-                int tx = sw ? PIN_N32_RX : PIN_N32_TX;
-                int rx = sw ? PIN_N32_TX : PIN_N32_RX;
-
-                if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) continue;
-                bool applied = (apply_cfg(tx, rx, bauds[bi]) == ESP_OK);
-                bool ok = applied && probe_locked(buf, &n, N32_PROBE_TIMEOUT_MS);
-                xSemaphoreGive(s_mutex);
-
-                attempt++;
-                Serial.printf("[n32] probe %d: baud=%u %s tx=%d rx=%d -> %s\n",
-                              attempt, (unsigned)bauds[bi],
-                              sw ? "SWAP" : "norm", tx, rx,
-                              ok ? "OK" : (applied ? "no reply" : "cfg fail"));
-                if (ok) {
-                    found = true;
-                    swapped = (sw != 0);
-                } else {
-                    delay(10);
-                }
-                if ((uint32_t)(millis() - t0) >= N32_PROBE_WINDOW_MS) break;
-            }
-        }
-    }
-
-    s_present = found;
-    if (found) {
-        Serial.printf("[n32] online baud=%u tx=%d rx=%d%s（%d 次探测）\n",
-                      (unsigned)s_baud, s_tx_pin, s_rx_pin,
-                      swapped ? " TX/RX 已对调" : "", attempt);
-    } else {
-        Serial.printf("[n32] no response (uart1 tx=%d rx=%d @%d, %d 次探测 %ums)\n",
-                      PIN_N32_TX, PIN_N32_RX, N32_BAUD, attempt,
-                      (unsigned)(millis() - t0));
-        // 没应答就回到默认配置，方便上层后续重试。
-        apply_cfg(PIN_N32_TX, PIN_N32_RX, N32_BAUD);
-    }
+    s_present = true;
+    Serial.printf("[n32] uart1 ready tx=%d rx=%d @%u（固定波特率，不探测）\n",
+                  PIN_N32_TX, PIN_N32_RX, (unsigned)s_baud);
 
     n32_selftest();
     return true;
@@ -417,9 +322,16 @@ bool n32_set_volume(uint8_t percent)
 {
     if (!s_inited) return false;
     if (percent > 100) percent = 100;
+    s_volume_pct = percent;
+
+    // ✅ 参考工程实测：这颗 N32 的 0x14 是 0~6 硬件档，不是 0~100。
+    // 直接塞 0~100 会被 N32 一律 clamp 到最大档——"怎么调音量都没变化"。
+    // 0=静音、6=最大，四舍五入映射。不要用软件压音量：8bit 直出的量化
+    // 噪声是绝对电平，软件往下压只会掉 SNR。
+    const uint8_t hardware_volume = (uint8_t)(((uint16_t)percent * 6 + 50) / 100);
 
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
-    bool ok = write_reg_locked(0x14, &percent, 1, N32_ACK_TIMEOUT_MS);
+    bool ok = write_reg_locked(0x14, &hardware_volume, 1, N32_ACK_TIMEOUT_MS) >= 0;
     xSemaphoreGive(s_mutex);
     return ok;
 }
@@ -430,7 +342,7 @@ bool n32_set_record(bool on)
 
     uint8_t v = on ? 1 : 0;
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
-    bool ok = write_reg_locked(0x10, &v, 1, N32_ACK_TIMEOUT_MS);
+    bool ok = write_reg_locked(0x10, &v, 1, N32_ACK_TIMEOUT_MS) >= 0;
     if (ok) s_record_on = on;
     xSemaphoreGive(s_mutex);
     return ok;
@@ -456,6 +368,161 @@ bool n32_read_lr(uint8_t *lr_raw)
     return n32_read_keys(lr_raw);
 }
 
+// ---------------------------------------------------------------- 音频流（对齐参考工程 codec）
+//
+// 起播序列完全照抄 alphapi_one_xiaozhi_car_radio 的 ConfigureOutputLocked（One S
+// 实测播音正常、且其注释里记录了每一步踩过的坑）：
+//   静默窗口(重配时) -> 0x14 音量(0~6 硬件档) -> 0x10/0 停录 -> 44 字节 WAV 头(等应答) -> 推 PCM
+// 每块 0x15 发完等 N32 回 0x91 <已收字节数>，这就是真正的流控；不自己做软件节流。
+
+// 写一块 0x15 音频（<=200 字节），等 0x91 应答，accepted = N32 实际收下的字节数。
+// 超时不算失败：这块已经发出去了，当"全部收下"继续，绝不重发——重发会让
+// 同一个音节播两遍。连续 20 次超时才判定链路死；流中途连续 4 次超时则把
+// s_stream_configured 清掉，下一块前完整重配（重发 WAV 头）。
+static bool write_audio_chunk_locked(const uint8_t *data, size_t len, uint8_t &accepted)
+{
+    if (len == 0 || len > N32_BLOCK_BYTES) return false;
+
+    uint8_t frame[N32_BLOCK_BYTES + 4];
+    frame[0] = 0x90;
+    frame[1] = 0x15;
+    frame[2] = (uint8_t)len;
+    memcpy(frame + 3, data, len);
+    uint8_t sum = 0;
+    for (size_t i = 0; i < len + 3; i++) sum += frame[i];
+    frame[len + 3] = sum;
+
+    // 背压保护：TX 若在 20ms 内还清不空，说明 N32 根本没在收这段流
+    //（放音态没建立）。此时再往里写会阻塞，把音频任务卡死。
+    if (uart_wait_tx_done(N32_UART, pdMS_TO_TICKS(20)) != ESP_OK) {
+        static int tx_block_logs = 0;
+        if (tx_block_logs++ < 5)
+            Serial.println("[n32] speaker tx busy, dropped chunk");
+        return false;
+    }
+    if (uart_write_bytes(N32_UART, (const char *)frame, len + 4) != (int)(len + 4)) {
+        return false;
+    }
+
+    int resp = wait_ack_locked(0x15, N32_ACK_TIMEOUT_MS);
+    if (resp < 0) {
+        ++s_ack_timeouts;
+        static uint32_t timeout_logs = 0;
+        if (timeout_logs++ < 20)
+            Serial.printf("[n32] stream ack timeout #%u (len=%u)\n",
+                          (unsigned)s_ack_timeouts, (unsigned)len);
+        if (s_stream_configured && s_ack_timeouts >= 4) {
+            s_stream_configured = false;
+            Serial.println("[n32] continuity rejected by N32 (4 ack timeouts) -> reconfigure");
+        }
+        accepted = (uint8_t)len;   // 当全部收下，绝不重发
+        return s_ack_timeouts < 20;
+    }
+
+    s_ack_timeouts = 0;
+    if (resp == 0 || resp > (int)len) {
+        // 0 会让上层原地重发死循环，超长无意义：都按整块处理
+        resp = (int)len;
+    }
+    accepted = (uint8_t)resp;
+    return true;
+}
+
+// 44 字节标准 WAV 头：PCM / 单声道 / 22050Hz / 8bit，长度字段 0xFFFFFFFF（流式）。
+// 采样率必须和喂进来的 PCM 一致，N32 按头里的字段配置播放通路。
+static bool send_wav_header_locked(void)
+{
+    uint8_t h[44] = {};
+    const uint32_t rate = (uint32_t)N32_SAMPLE_RATE;
+    auto put16 = [&h](int off, uint16_t v) {
+        h[off] = (uint8_t)(v & 0xFF);
+        h[off + 1] = (uint8_t)((v >> 8) & 0xFF);
+    };
+    auto put32 = [&h](int off, uint32_t v) {
+        h[off] = (uint8_t)(v & 0xFF);
+        h[off + 1] = (uint8_t)((v >> 8) & 0xFF);
+        h[off + 2] = (uint8_t)((v >> 16) & 0xFF);
+        h[off + 3] = (uint8_t)((v >> 24) & 0xFF);
+    };
+    memcpy(h + 0, "RIFF", 4);
+    put32(4, 0xFFFFFFFFu);
+    memcpy(h + 8, "WAVE", 4);
+    memcpy(h + 12, "fmt ", 4);
+    put32(16, 16);        // fmt 块长度
+    put16(20, 1);         // PCM
+    put16(22, 1);         // 单声道
+    put32(24, rate);      // 采样率
+    put32(28, rate);      // 字节率 = rate * 1ch * 1byte
+    put16(32, 1);         // block align
+    put16(34, 8);         // 8 bit
+    memcpy(h + 36, "data", 4);
+    put32(40, 0xFFFFFFFFu);
+
+    // 头也要等应答、按"已接收字节数"分段投递：截断的头会让 N32 按错误格式播整段
+    size_t sent = 0;
+    bool ok = true;
+    while (sent < sizeof(h)) {
+        uint8_t accepted = 0;
+        if (!write_audio_chunk_locked(h + sent, sizeof(h) - sent, accepted) || accepted == 0) {
+            ok = false;
+            break;
+        }
+        size_t adv = accepted;
+        if (adv > sizeof(h) - sent) adv = sizeof(h) - sent;
+        sent += adv;
+    }
+    static int hdr_logs = 0;
+    if (hdr_logs++ < 3)
+        Serial.printf("[n32] wav header sent ok=%d sent=%u/44 rate=%u\n",
+                      ok ? 1 : 0, (unsigned)sent, (unsigned)rate);
+    return ok;
+}
+
+// 完整起播序列（调用时必须已持有 s_mutex）。见文件头注释。
+static bool configure_output_locked(void)
+{
+    // ── 播放中重建输出流：先给 N32 静默窗口，把 FIFO 里的残留 PCM 放完 ──
+    // 头的 44 字节如果紧跟在残留 PCM 后面发，会被 N32 当音频播出来（"电流音"）。
+    // 250~400ms 足够放完（每块 200 字节 ≈ 9ms，N32 逐块回 0x91 确认）。
+    if (s_last_pcm_ms != 0) {
+        uint32_t gap = millis() - s_last_pcm_ms;
+        if (gap < 400) vTaskDelay(pdMS_TO_TICKS(400 - gap));
+    }
+
+    // 1) 音量：0~100 -> 0~6 硬件档。写失败不致命（不同固件对 0x14 应答格式有差异）
+    uint8_t hw_vol = (uint8_t)(((uint16_t)s_volume_pct * 6 + 50) / 100);
+    if (write_reg_locked(0x14, &hw_vol, 1, N32_ACK_TIMEOUT_MS) < 0) {
+        static int vol_warn = 0;
+        if (vol_warn++ < 3)
+            Serial.printf("[n32] volume write ack failed (vol=%u%% -> step %u/6)\n",
+                          s_volume_pct, hw_vol);
+    }
+
+    // 2) 停录：半双工，N32 必须先退出录音态才认 0x15 音频流
+    uint8_t stop_input = 0;
+    if (write_reg_locked(0x10, &stop_input, 1, N32_ACK_TIMEOUT_MS) < 0) {
+        static int stop_warn = 0;
+        if (stop_warn++ < 3)
+            Serial.println("[n32] stop-record ack failed, keep streaming anyway");
+    }
+
+    // 3) WAV 头
+    bool ok = send_wav_header_locked();
+    if (!ok) {
+        static int hdr_warn = 0;
+        if (hdr_warn++ < 3) Serial.println("[n32] wav header write failed");
+    }
+    s_stream_configured = ok;
+    s_ack_timeouts = 0;
+    return ok;
+}
+
+// ✅ v5 手册 §3.5：N32 0x15 流通道吃 8-bit unsigned PCM @ 22050Hz mono。
+// 输入是内部统一的 s16 mono（22050Hz，由 pcm_out 重采样保证），
+// 这里做 s16 -> u8 转换（加 0x8000 直流偏置取高字节）。
+// 流控完全对齐参考工程：每块等 0x91 应答，accepted 是多少前进多少；
+// 超时当整块收下继续（绝不重发）；首次写自动走完整起播序列（WAV 头）。
+// 返回实际写入的样本数（1 样本 = 1 字节），< count 表示超时/失败。
 size_t n32_write_pcm(const int16_t *samples, size_t count)
 {
     if (!s_inited || !samples || count == 0) return 0;
@@ -463,52 +530,76 @@ size_t n32_write_pcm(const int16_t *samples, size_t count)
     // 半双工：播放前先停录音。set_record 自己会拿锁，不能在持锁时调用。
     if (s_record_on) n32_set_record(false);
 
-    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return 0;
-
-    const uint8_t *bytes = (const uint8_t *)samples;
-    size_t total = count * sizeof(int16_t);
-    size_t done = 0;
+    // 放音时这把锁只会在按键轮询的短窗口里被占，200ms 上限足够
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return 0;
 
     // 诊断计数：每秒汇总一次发送结果，定位"断流"发生在哪一步
-    static uint32_t st_sent = 0, st_fail = 0, st_ackless = 0, st_last = 0;
+    static uint32_t st_sent = 0, st_fail = 0, st_last = 0;
 
-    // N32 音频帧必须等 ACK——厂商驱动 write_pcm 每帧 read(3) 读回 ACK，这就是流控。
-    while (done < total) {
-        uint8_t block[N32_BLOCK_BYTES];
-        size_t blk = total - done;
-        if (blk > N32_BLOCK_BYTES) blk = N32_BLOCK_BYTES;
-        memcpy(block, bytes + done, blk);
-        if (blk < N32_BLOCK_BYTES) memset(block + blk, 0, N32_BLOCK_BYTES - blk);
+    // 首次写入（或兜底重配触发）：完整起播序列
+    if (!s_stream_configured && !configure_output_locked()) {
+        xSemaphoreGive(s_mutex);
+        return 0;
+    }
 
-        if (!write_reg_locked(0x15, block, N32_BLOCK_BYTES, N32_ACK_TIMEOUT_MS)) {
-            uint8_t alive = 0;
-            if (read_reg_locked(0x00, 1, &alive, N32_READ_TIMEOUT_MS)) {
-                s_ack_required = false;
-                st_ackless++;
-                if (st_ackless == 1)
-                    Serial.println("[n32] 音频写无 ACK 但读有应答 -> 切免 ACK 模式");
-            } else {
+    // 缓冲放静态区：这条链上每层一个 200 字节帧缓冲，栈上叠起来会压爆音频任务
+    static uint8_t pcm[N32_BLOCK_BYTES];
+
+    size_t done = 0;   // 样本数（= 字节数，1:1）
+    while (done < count) {
+        size_t n = count - done;
+        if (n > N32_BLOCK_BYTES) n = N32_BLOCK_BYTES;
+
+        for (size_t i = 0; i < n; i++) {
+            uint16_t s = (uint16_t)samples[done + i];
+            pcm[i] = (uint8_t)((s ^ 0x8000) >> 8);
+        }
+
+        size_t sent = 0;
+        int zero_retries = 0;
+        bool fail = false;
+        while (sent < n) {
+            uint8_t accepted = 0;
+            if (!write_audio_chunk_locked(pcm + sent, n - sent, accepted)) {
                 st_fail++;
                 if (st_fail == 1)
                     Serial.printf("[n32] pcm 写失败 @%u/%u baud=%u\n",
-                                  (unsigned)done, (unsigned)total, (unsigned)s_baud);
+                                  (unsigned)(done + sent), (unsigned)count,
+                                  (unsigned)s_baud);
+                fail = true;
                 break;
             }
+            if (accepted == 0) {
+                if (++zero_retries > 10) {
+                    Serial.println("[n32] speaker stream stalled");
+                    fail = true;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            size_t adv = (accepted < (n - sent)) ? accepted : (n - sent);
+            sent += adv;
+            zero_retries = 0;
+            // ★只有真的把一块 PCM 交给 N32 才更新（重配静默窗口的计时依据）
+            s_last_pcm_ms = millis();
         }
+
+        if (fail) break;
         st_sent++;
-        done += blk;
+        done += n;
     }
 
     if ((uint32_t)(millis() - st_last) >= 1000) {
         st_last = millis();
-        Serial.printf("[n32] pcm 统计: 发%u帧 免ACK%u 失败%u ack_req=%d\n",
-                      (unsigned)st_sent, (unsigned)st_ackless, (unsigned)st_fail,
-                      s_ack_required ? 1 : 0);
-        st_sent = st_fail = st_ackless = 0;
+        Serial.printf("[n32] pcm 统计: 发%u帧 失败%u ack超时=%u 配置=%d\n",
+                      (unsigned)st_sent, (unsigned)st_fail,
+                      (unsigned)s_ack_timeouts, s_stream_configured ? 1 : 0);
+        st_sent = st_fail = 0;
     }
 
     xSemaphoreGive(s_mutex);
-    return done / sizeof(int16_t);
+    return done;
 }
 
 bool n32_selftest(void)
@@ -539,9 +630,10 @@ bool n32_selftest(void)
     pass = pass && ok;
 
     // 2) 写音量 0x14，再读回来确认（0x14 手册标的是只写，读不回来不一定算错）
-    uint8_t vol = 30;
-    bool w = write_reg_locked(0x14, &vol, 1, N32_ACK_TIMEOUT_MS);
-    if (!w && s_ack_required) {
+    // ✅ 0x14 是 0~6 硬件档：自检写中间档 3
+    uint8_t vol = 3;
+    int w = write_reg_locked(0x14, &vol, 1, N32_ACK_TIMEOUT_MS);
+    if (w < 0 && s_ack_required) {
         // 和 n32_write_pcm 同样的判断：读得回来就是芯片不发 ACK。
         uint8_t alive = 0;
         if (read_reg_locked(0x00, 1, &alive, N32_READ_TIMEOUT_MS)) {
@@ -550,14 +642,14 @@ bool n32_selftest(void)
             w = write_reg_locked(0x14, &vol, 1, N32_ACK_TIMEOUT_MS);
         }
     }
-    Serial.printf("[n32]   volume 0x14 <- %u : %s\n", vol, w ? "ok" : "FAIL");
+    Serial.printf("[n32]   volume 0x14 <- %u : %s\n", vol, w >= 0 ? "ok" : "FAIL");
 
     uint8_t back = 0;
     bool r = read_reg_locked(0x14, 1, &back, N32_READ_TIMEOUT_MS);
     Serial.printf("[n32]   volume 0x14 -> %s val=%u%s\n",
                   r ? "ok" : "FAIL", back,
-                  (!r && w) ? "（该寄存器可能只写，不算致命）" : "");
-    pass = pass && w;
+                  (!r && w >= 0) ? "（该寄存器可能只写，不算致命）" : "");
+    pass = pass && (w >= 0);
 
     xSemaphoreGive(s_mutex);
     Serial.printf("[n32] selftest: %s\n", pass ? "PASS" : "FAIL");

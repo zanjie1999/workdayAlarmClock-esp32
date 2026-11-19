@@ -1,4 +1,7 @@
-// pcm_out.cpp -- 任意采样率/声道 -> 16k mono -> N32，带可落地的延迟补偿
+// pcm_out.cpp -- 任意采样率/声道 -> 22050 mono -> 转 8-bit unsigned -> N32，带可落地的延迟补偿
+//
+// ✅ v5 手册 §3.5：N32 0x15 流通道只吃 8-bit unsigned PCM @ 22050Hz mono
+// （16-bit 送进去必是白噪音）。s16 -> u8 的转换在 n32_write_pcm 里做。
 //
 // 对应 Go 版 player/pcmsync.go 的两态思路：
 //   - 稳态：每 30ms 量一次本地排队，超过目标+死区就从环形缓冲头部丢旧音频。
@@ -19,10 +22,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define OUT_RATE 16000
-#define OUT_SAMPLES_PER_MS (OUT_RATE / 1000)      // 16
-#define RING_SAMPLES (OUT_RATE * 3 / 2)           // 24000 样本 = 48000 字节 = 1.5s
-#define FEED_SAMPLES 100                          // 200 字节 / 2
+// ✅ v5 手册 §3.5：输出 22050Hz（8-bit 转换在 n32_write_pcm 内部做）
+#define OUT_RATE 22050
+#define OUT_SAMPLES_PER_MS (OUT_RATE / 1000)      // ~22
+#define RING_SAMPLES (OUT_RATE * 3 / 2)           // 33075 样本 = 66150 字节 = 1.5s
+#define FEED_SAMPLES N32_BLOCK_BYTES              // 200 样本 -> 一整块 200 字节 u8
 
 // 稳态参数，数值照抄 Go 版
 #define CHECK_MS 30
@@ -164,7 +168,7 @@ static void reset_resampler_locked(void)
     s_fir_len = 0;
 }
 
-// 抗混叠 FIR 低通：48k/44.1k -> 16k 是 3:1 抽取，线性插值会严重混叠（刺耳杂音）。
+// 抗混叠 FIR 低通：48k/44.1k -> 22.05k 是 >2:1 抽取，线性插值会严重混叠（刺耳杂音）。
 // 用 32 阶 FIR（Hamming 窗，截止 ~7.2kHz）先低通再抽取，杂音基本消失。
 // FIR 是无反馈的滑动窗口滤波，不会像 IIR 那样跨块累积误差导致静音。
 // 系数按 fc=0.45*OUT_RATE/input_rate 归一化设计，不同输入采样率用不同组。
@@ -183,7 +187,7 @@ static inline float fir_filter(const float *coef, float x)
     return acc;
 }
 
-// 线性插值：输入 rate Hz -> 输出 16k。step 是每个输出样本跨过的输入样本数。
+// 线性插值：输入 rate Hz -> 输出 22050。step 是每个输出样本跨过的输入样本数。
 static size_t resample_locked(const int16_t *in, size_t n, int16_t *out, size_t cap,
                               uint32_t rate)
 {

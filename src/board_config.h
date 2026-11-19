@@ -7,27 +7,28 @@
 
 #include <stdint.h>
 
-// ---------------- 屏幕 (ST7789 128x160) ----------------
+// ---------------- 屏幕 (ST7789 160x128 横屏) ----------------
+// ✅ v5 手册 §2.2 实测锁定（旧值 35/37/38/33/36/10/11 是错误逆向，已废弃）
 #ifndef PIN_LCD_MOSI
-#define PIN_LCD_MOSI 35
+#define PIN_LCD_MOSI 42
 #endif
 #ifndef PIN_LCD_SCK
-#define PIN_LCD_SCK 37
+#define PIN_LCD_SCK 41
 #endif
 #ifndef PIN_LCD_MISO
-#define PIN_LCD_MISO 38
+#define PIN_LCD_MISO 47
 #endif
 #ifndef PIN_LCD_CS
-#define PIN_LCD_CS 33
+#define PIN_LCD_CS 38
 #endif
 #ifndef PIN_LCD_DC
-#define PIN_LCD_DC 36
+#define PIN_LCD_DC 40
 #endif
 #ifndef PIN_LCD_RST
-#define PIN_LCD_RST 10
+#define PIN_LCD_RST 39
 #endif
 #ifndef PIN_LCD_BL
-#define PIN_LCD_BL 11
+#define PIN_LCD_BL 37
 #endif
 
 #ifndef LCD_H_RES
@@ -36,29 +37,23 @@
 #ifndef LCD_V_RES
 #define LCD_V_RES 128
 #endif
+// ✅ 参考工程（alphapi_one_xiaozhi_car_radio）实测值 31.25MHz
 #ifndef LCD_SPI_HZ
-#define LCD_SPI_HZ 40000000
+#define LCD_SPI_HZ 31250000
 #endif
 
-// 屏幕型号：0 = ST7789（当前这块板，备份固件确认为 ST7789 C 驱动），
-//           1 = ST7735S（另一块备用，排线丝印 fxd018qq8）
-// 备份固件（MicroPython 1.19.1 + ESP-IDF v4.4.1）里是 C 实现的 ST7789 驱动
-//（printf 串 "<ST7789 width=%u...>" 可证），用 esp_lcd 官方初始化序列。
-#ifndef LCD_PANEL_ST7735
-#define LCD_PANEL_ST7735 0
+// ✅ 参考工程实测：这块屏不需要反相（invert=true 时整屏白变黑）
+#ifndef LCD_INVERT
+#define LCD_INVERT 0
 #endif
 
 // 屏的显存偏移（部分 128x160 模组需要 1~3 像素偏移，花屏/错位时调这里）
+// 注：esp_lcd 版驱动实测偏移为 0（参考工程同款），非 0 时需在驱动层适配。
 #ifndef LCD_X_OFFSET
 #define LCD_X_OFFSET 0
 #endif
 #ifndef LCD_Y_OFFSET
 #define LCD_Y_OFFSET 0
-#endif
-
-// 颜色反相：多数 1.14" IPS 需要开；若显示像底片一样就把这个改成 0
-#ifndef LCD_INVERT
-#define LCD_INVERT 1
 #endif
 
 // 安装方向：0=竖屏 1=横屏(MV|MX) 2=竖屏倒置 3=横屏反向
@@ -87,11 +82,10 @@
 #define LCD_SWAP_BYTES 1
 #endif
 
-// 背光极性：0 = 高电平点亮（多数模组），1 = 低电平点亮（PNP/MOSFET 倒相）
+// 背光：参考工程同款，GPIO 直接拉高，不发 PWM（下列宏已废弃，保留占位）
 #ifndef LCD_BL_ACTIVE_LOW
 #define LCD_BL_ACTIVE_LOW 0
 #endif
-// 背光是否用 LEDC 调光：0 只用 GPIO 全开/全关（怀疑 LEDC 冲突时用这个排除）
 #ifndef LCD_BL_USE_PWM
 #define LCD_BL_USE_PWM 1
 #endif
@@ -102,15 +96,6 @@
 #define LCD_BL_PWM_HZ 5000
 #endif
 
-// SPI 频率：40MHz 对排线/杜邦线偏高（白屏/花屏/初始化时序被打歪都可能是它）。
-// 默认先用 10MHz 把画面跑通；确认稳定后把 LCD_SPI_USE_SAFE 改成 0 提到 LCD_SPI_HZ。
-#ifndef LCD_SPI_HZ_SAFE
-#define LCD_SPI_HZ_SAFE 10000000
-#endif
-#ifndef LCD_SPI_USE_SAFE
-#define LCD_SPI_USE_SAFE 1
-#endif
-
 // ---------------- N32 音频协处理器 ----------------
 #ifndef PIN_N32_TX
 #define PIN_N32_TX 3
@@ -118,12 +103,18 @@
 #ifndef PIN_N32_RX
 #define PIN_N32_RX 0
 #endif
+// ✅ 参考工程（alphapi_one_xiaozhi_car_radio）实机实测：N32 在 460800 应答
+//（1Mbps 完全静默）。固定此值，不探测。
 #ifndef N32_BAUD
-#define N32_BAUD 1000000
+#define N32_BAUD 460800
 #endif
 
-// N32 只要 16k / 16bit / mono
-#define N32_SAMPLE_RATE 16000
+// ✅ v5 手册 §3.5 实测锁定：0x15 流通道吃 8-bit unsigned PCM @ 22050Hz mono。
+// 16-bit/16k 是早期错误结论，16-bit 送进去必出白噪音。
+#ifndef N32_SAMPLE_RATE
+#define N32_SAMPLE_RATE 22050
+#endif
+#define N32_SAMPLE_BYTES 1   // 8-bit unsigned
 #define N32_BLOCK_BYTES 200  // 手册: 每块 200 字节
 
 // ---------------- 按键来源 ----------------

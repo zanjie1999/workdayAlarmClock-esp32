@@ -2,9 +2,10 @@
  * backlight.c -- 背光（ESP32：直接驱动 ST7789 模组的 BL 脚 / LEDC PWM）
  *
  * Linux 版要在 /sys/class/backlight、/sys/class/leds、gpio 之间挨个探测；
- * 这块板只有一条 BL 脚（board_config.h 的 PIN_LCD_BL），而且
- * display_st7789.cpp 里已经用 LEDC(5kHz/10bit) 把它做成了 0..100 的调光口，
- * 所以这里只是把 backlight_set() 转给 display_set_backlight()。
+ * 这块板只有一条 BL 脚（board_config.h 的 PIN_LCD_BL）。
+ * ✅ 参考工程同款：背光是 GPIO 直接拉高，全程不发 PWM，所以
+ * display_set_backlight() 目前忽略亮度值（恒定全亮），
+ * 这里只是把 backlight_set() 转给它，设置页的亮度条暂时不改变实际亮度。
  *
  * 有背光 = true，设置页因此会显示亮度条（源工程那块 rns 音箱调不了，是 false）。
  */

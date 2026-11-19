@@ -1,6 +1,6 @@
-// pcm_out.cpp -- 任意采样率/声道 -> 22050 mono -> 转 8-bit unsigned -> N32，带可落地的延迟补偿
+// pcm_out.cpp -- 任意采样率/声道 -> 24000 mono -> 转 8-bit unsigned -> N32，带可落地的延迟补偿
 //
-// ✅ v5 手册 §3.5：N32 0x15 流通道只吃 8-bit unsigned PCM @ 22050Hz mono
+// ✅ v5 手册 §3.5：N32 0x15 流通道只吃 8-bit unsigned PCM @ 24000Hz mono
 // （16-bit 送进去必是白噪音）。s16 -> u8 的转换在 n32_write_pcm 里做。
 //
 // 对应 Go 版 player/pcmsync.go 的两态思路：
@@ -22,8 +22,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-// ✅ v5 手册 §3.5：输出 22050Hz（8-bit 转换在 n32_write_pcm 内部做）
-#define OUT_RATE 22050
+// ✅ 参考工程 alphapi_one_audio_codec.cc：N32 芯片播放时钟固定 24000Hz，
+// 输出必须重采样到 24000（头里也写 24000），8-bit 转换在 n32_write_pcm 里做。
+#define OUT_RATE 24000
 #define OUT_SAMPLES_PER_MS (OUT_RATE / 1000)      // ~22
 #define RING_SAMPLES (OUT_RATE * 3 / 2)           // 33075 样本 = 66150 字节 = 1.5s
 #define FEED_SAMPLES N32_BLOCK_BYTES              // 200 样本 -> 一整块 200 字节 u8
@@ -187,7 +188,7 @@ static inline float fir_filter(const float *coef, float x)
     return acc;
 }
 
-// 线性插值：输入 rate Hz -> 输出 22050。step 是每个输出样本跨过的输入样本数。
+// 线性插值：输入 rate Hz -> 输出 24000。step 是每个输出样本跨过的输入样本数。
 static size_t resample_locked(const int16_t *in, size_t n, int16_t *out, size_t cap,
                               uint32_t rate)
 {

@@ -7,7 +7,7 @@
 // 寄存器：0x00 按键 / 0x10 录音开关 / 0x11 麦克风 PCM / 0x14 音量 / 0x15 播放 PCM
 //
 // 播放（照抄参考工程）：首次写 PCM 自动走完整起播序列
-//   0x14 音量(0~6 硬件档) -> 0x10/0 停录 -> 44 字节 WAV 头(22050/8bit/mono, 等应答)
+//   0x14 音量(0~6 硬件档) -> 0x10/0 停录 -> 44 字节 WAV 头(24000/8bit/mono, 等应答)
 //   -> 按 200 字节分块推 PCM，每块等 0x91 应答，收多少前进多少；
 //   超时当整块收下继续（绝不重发），连续 4 次超时下块前完整重配，20 次判链路死。
 //
@@ -33,13 +33,13 @@ bool n32_init(void);
 // 直接塞 0~100 会被一律 clamp 到最大档）
 bool n32_set_volume(uint8_t percent);
 
-// 读按键：返回 A/B 的原始字节（低电平有效，按下该位为 0）
+// 读按键：返回 A/B 的原始字节（高电平有效，按下该位为 1；参考工程 config.h 同款）
 bool n32_read_keys(uint8_t *ab_raw);
 
 // 读 L/R：老固件的 uart_read(0,1)[3]，bit1=L bit0=R（高电平有效）
 bool n32_read_lr(uint8_t *lr_raw);
 
-// 写 PCM（s16 mono，22050Hz 由 pcm_out 保证；内部转 8-bit unsigned 后按
+// 写 PCM（s16 mono，24000Hz 由 pcm_out 保证；内部转 8-bit unsigned 后按
 // 200 字节分块，用写响应 resp[2] 做响应驱动流控，✅ v5 手册 §3.5/§3.6）
 // 返回实际写入的样本数，< count 表示超时/失败
 size_t n32_write_pcm(const int16_t *samples, size_t count);

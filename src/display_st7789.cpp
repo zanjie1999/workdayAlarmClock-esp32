@@ -22,8 +22,25 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
+#include <freertos/semphr.h>
 
 #define LCD_LOG(...) Serial.printf("[lcd] " __VA_ARGS__)
+
+// IDF 4.4 的 esp_lcd_panel_io_tx_color 是异步的（spi_device_queue_trans 排队即返回，
+// DMA 在后台继续读缓冲）。我们分带推送要复用 s_band，必须等 DMA 真正读完才能重写，
+// 否则每条带后半段会被下一带的数据覆盖 —— 表现为"每隔几行往下复制几行"。
+// 这里用 on_color_trans_done 回调 + 二值信号量实现"推完一带等一带"。
+static SemaphoreHandle_t s_color_done = nullptr;
+
+static bool IRAM_ATTR lcd_color_trans_done_cb(esp_lcd_panel_io_handle_t io,
+                                              esp_lcd_panel_io_event_data_t *edata,
+                                              void *user_ctx)
+{
+    (void)io; (void)edata; (void)user_ctx;
+    BaseType_t hpw = pdFALSE;
+    if (s_color_done) xSemaphoreGiveFromISR(s_color_done, &hpw);
+    return hpw == pdTRUE;
+}
 
 #define PUSH_BAND_ROWS 8
 // 必须内部 RAM + 4 字节对齐：IDF 4.4 的 esp_lcd 不做内部拷贝，
@@ -37,26 +54,26 @@ static bool     s_bl_ready = false;
 static uint8_t  s_rot      = LCD_ROTATION & 3;
 
 // ---------------------------------------------------------------- 背光
-// GPIO 直接拉高点亮（参考工程同款：上电就亮，全程不发 PWM）。
+// LEDC PWM 调亮度（设置页亮度条真正生效）。
+// 早期实现照参考工程 GPIO 恒高、忽略亮度值；但 UI 侧有亮度设置项，
+// 这里改用 LEDC：5kHz / 8-bit，占空比 = 亮度百分比，0 = 熄屏。
+#define LCD_BL_PWM_CH   0      // 全工程只有背光一个 PWM，通道不冲突
+#define LCD_BL_PWM_FREQ 5000
+#define LCD_BL_PWM_RES  8
+
 static void bl_hw_init(void)
 {
     if (s_bl_ready) return;
-    gpio_config_t cfg = {};
-    cfg.pin_bit_mask  = 1ULL << PIN_LCD_BL;
-    cfg.mode          = GPIO_MODE_OUTPUT;
-    cfg.pull_up_en    = GPIO_PULLUP_DISABLE;
-    cfg.pull_down_en  = GPIO_PULLDOWN_DISABLE;
-    cfg.intr_type     = GPIO_INTR_DISABLE;
-    gpio_config(&cfg);
-    gpio_set_level((gpio_num_t)PIN_LCD_BL, 1);
+    ledcSetup(LCD_BL_PWM_CH, LCD_BL_PWM_FREQ, LCD_BL_PWM_RES);
+    ledcAttachPin(PIN_LCD_BL, LCD_BL_PWM_CH);
     s_bl_ready = true;
 }
 
 void display_set_backlight(uint8_t percent)
 {
-    (void)percent;
+    if (percent > 100) percent = 100;
     bl_hw_init();
-    gpio_set_level((gpio_num_t)PIN_LCD_BL, 1);
+    ledcWrite(LCD_BL_PWM_CH, (uint32_t)percent * ((1 << LCD_BL_PWM_RES) - 1) / 100);
 }
 
 void display_backlight_probe(void)
@@ -112,6 +129,12 @@ static void push_bands(uint16_t x0, uint16_t y0, uint16_t x1e, uint16_t y1e,
             dst += row_bytes;
         }
         esp_lcd_panel_draw_bitmap(s_panel, x0, y0 + r0, x1e, y0 + r0 + rows, s_band);
+        // 等这条带的 DMA 真正读完 s_band 再去重写（tx_color 是异步的，见文件头说明）。
+        // 超时只是兜底防丢回调，正常情况下回调在传输结束的 ISR 里立刻 give。
+        if (s_color_done &&
+            xSemaphoreTake(s_color_done, pdMS_TO_TICKS(100)) != pdTRUE) {
+            LCD_LOG("color trans wait timeout\n");
+        }
     }
 }
 
@@ -130,8 +153,9 @@ void display_fill(uint16_t color_rgb565)
 {
     if (!s_ready) return;
     const uint8_t hi = (uint8_t)(color_rgb565 >> 8), lo = (uint8_t)(color_rgb565 & 0xFF);
-    // 预填满整条带缓冲（大端），之后每带直接推
-    for (size_t i = 0; i < LCD_H_RES; i++) {
+    // 预填满整条带缓冲（大端），之后每带直接推。
+    // 注意必须填满整条带（160*8 像素），只填 1 行的话后面 7 行是静态零值=黑。
+    for (size_t i = 0; i < LCD_H_RES * PUSH_BAND_ROWS; i++) {
         s_band[i * 2]     = hi;
         s_band[i * 2 + 1] = lo;
     }
@@ -139,6 +163,12 @@ void display_fill(uint16_t color_rgb565)
         uint16_t rows = LCD_V_RES - y;
         if (rows > PUSH_BAND_ROWS) rows = PUSH_BAND_ROWS;
         esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_H_RES, y + rows, s_band);
+        // 内容虽是同一份，但也要按"一次 tx_color 一次 give"的节奏收信号量，
+        // 否则信号量攒着，后面 push_bands 的第一次等待会被跳过。
+        if (s_color_done &&
+            xSemaphoreTake(s_color_done, pdMS_TO_TICKS(100)) != pdTRUE) {
+            LCD_LOG("color trans wait timeout (fill)\n");
+        }
     }
 }
 
@@ -160,6 +190,8 @@ void display_init(void)
 {
     if (s_ready) return;
 
+    if (!s_color_done) s_color_done = xSemaphoreCreateBinary();
+
     // 背光先点亮（参考工程同款：先亮背光，后面画的东西才看得见）
     bl_hw_init();
 
@@ -178,14 +210,18 @@ void display_init(void)
     }
 
     esp_lcd_panel_io_spi_config_t io_cfg = {};
+    io_cfg.on_color_trans_done = lcd_color_trans_done_cb;
     io_cfg.cs_gpio_num       = PIN_LCD_CS;
     io_cfg.dc_gpio_num       = PIN_LCD_DC;
     io_cfg.spi_mode          = 0;
     io_cfg.pclk_hz           = LCD_SPI_HZ;    // 实测 31250000
-    io_cfg.trans_queue_depth = 0;             // 0 = 同步传输，flush 返回即已在总线上
+    io_cfg.trans_queue_depth = 1;             // IDF 4.4 不能为 0（queue_size=0 会
+                                              // xQueueCreate 断言死机）；>=1 时
+                                              // esp_lcd 发完就等结果，仍是同步语义
     io_cfg.lcd_cmd_bits      = 8;
     io_cfg.lcd_param_bits    = 8;
-    err = esp_lcd_new_panel_io_spi(SPI2_HOST, &io_cfg, &s_io);
+    err = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)(uint32_t)SPI2_HOST,
+                                   &io_cfg, &s_io);
     if (err != ESP_OK) {
         LCD_LOG("esp_lcd_new_panel_io_spi failed: %s\n", esp_err_to_name(err));
         return;

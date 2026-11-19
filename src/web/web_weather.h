@@ -12,3 +12,8 @@
 
 // 必须在 webui_register 之前调用（webui 的 "/*" 会抢走所有 GET）。
 esp_err_t web_weather_register(httpd_handle_t srv);
+
+// 主动拉一次天气（对齐 Go 定时器的整点/开机拉取）：
+// 有城市代码且本小时内没拉过才真正发请求；成功后给 LVGL 发
+// WEATHER / WEATHERAL 事件（alarm_tick 的整点和开机首次都会调）。
+void weather_refresh();

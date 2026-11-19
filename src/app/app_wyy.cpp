@@ -140,7 +140,7 @@ static String csrf_from_cookie(const String &cookie)
 
 // ---------------------------------------------------------------- 播放地址
 
-bool wyy_song_url(const String &id, String *url)
+bool wyy_song_url(const String &id, String *url, uint32_t *dur_ms)
 {
     String cookie, quality;
     {
@@ -187,7 +187,14 @@ bool wyy_song_url(const String &id, String *url)
         return false;
     }
     *url = u;
-    ALOG("wyy", "播放地址 ok id=%s len=%u", id.c_str(), (unsigned)u.length());
+    if (dur_ms) {
+        // enhance/player/url 的 data 里带 "time"（歌曲总时长，毫秒），给进度条用；
+        // 拿不到就 0，UI 端进度条退化为纯已播时间。
+        long t = 0;
+        *dur_ms = (json_get_int_from(data, "time", &t) && t > 0) ? (uint32_t)t : 0;
+    }
+    ALOG("wyy", "播放地址 ok id=%s len=%u dur=%u", id.c_str(), (unsigned)u.length(),
+         dur_ms ? (unsigned)*dur_ms : 0);
     return true;
 }
 
@@ -273,11 +280,15 @@ static bool parse_playlist(const char *js, std::vector<String> *ids, String *nam
         if (!k || k >= end) break;
         const char *colon = strchr(k, ':');
         if (!colon || colon >= end) break;
-        char *stop = nullptr;
-        long v = strtol(colon + 1, &stop, 10);
-        if (stop == colon + 1) break;
-        if (v > 0) ids->push_back(String(v));
-        cur = stop;
+        // 直接按字符抠数字，不走 strtol/long：ESP32 的 long 是 32 位，
+        // 网易云新歌 id 已超过 2147483647，strtol 溢出会把 id 变成 LONG_MAX。
+        const char *ns = colon + 1;
+        while (*ns == ' ' || *ns == '"') ns++;
+        const char *ne = ns;
+        while (*ne >= '0' && *ne <= '9') ne++;
+        if (ne == ns) break;
+        ids->push_back(String(ns).substring(0, (unsigned)(ne - ns)));
+        cur = ne;
         if (ids->size() >= 500) break;  // 内存有限，最多 500 首
     }
     return ids->size() > 0;

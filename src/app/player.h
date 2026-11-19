@@ -63,6 +63,7 @@ bool player_is_paused();
 bool player_is_alarm();
 String player_now_playing();
 int player_vol();
+uint32_t player_name_gen();        // 曲名代次：s.name 每次变化 +1（web 切歌接口等它）
 
 // ---------------------------------------------------------------- 只读状态（/status 用）
 // 对应 Go 版 player 包导出的字段，取不到的返回空串/0。

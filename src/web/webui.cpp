@@ -245,16 +245,16 @@ static esp_err_t h_status(httpd_req_t *req)
     //   * ESP32 经典款有内部 VCC 通道，直接 ESP.getVcc()
     //   * S3/C3 之类的芯片没有这个通道，getVcc() 根本不存在（编译期就没有）
     //     —— 只有当板子把电池分压接到某个 ADC 脚时，才用下面这个宏读真值。
-    //     没定义就如实给 "?"，不要编一个数字骗前端。
+    //     没定义就如实给空串（前端据此隐藏电量位），不要编一个数字骗前端。
 #ifndef PIN_VBAT_ADC
-    const char *bat_str = "?";
+    const char *bat_str = "";
 #else
     char vbuf[16];
     {
         uint32_t mv = (uint32_t)analogReadMilliVolts(PIN_VBAT_ADC);
         // 板上一般是 1/2 分压，乘 2 还原电池电压
         mv *= 2;
-        if (mv < 2000 || mv > 6000) snprintf(vbuf, sizeof(vbuf), "?");
+        if (mv < 2000 || mv > 6000) snprintf(vbuf, sizeof(vbuf), "");
         else                        snprintf(vbuf, sizeof(vbuf), "%.2fV", mv / 1000.0);
         bat_str = vbuf;
     }
@@ -453,8 +453,16 @@ static esp_err_t h_dispatch(httpd_req_t *req)
         if (!strcmp(uri, kCmds[i].uri)) {
             app_cmd_feed(kCmds[i].cmd);
             if (!strcmp(uri, "/stop")) return send_html_raw(req, String("<h1>stop</h1>") + JS2HOME);
-            if (!strcmp(uri, "/next")) return send_html_raw(req, String("<h2>") + player_now_playing() + "</h2>" + JS2HOME);
-            if (!strcmp(uri, "/prev")) return send_html_raw(req, String("<h2>") + player_now_playing() + "</h2>" + JS2HOME);
+            if (!strcmp(uri, "/next") || !strcmp(uri, "/prev")) {
+                // 切歌是异步的（player 任务要拿播放地址+曲名，走两次网络），
+                // 对齐 Go 的同步语义：等曲名代次变化再回页面，最多 4 秒，
+                // 超时就回当前值（单曲循环重播时曲名不变，靠超时兜底）。
+                const uint32_t gen0 = player_name_gen();
+                const uint32_t t0   = millis();
+                while (millis() - t0 < 4000 && player_name_gen() == gen0)
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                return send_html_raw(req, String("<h2>") + player_now_playing() + "</h2>" + JS2HOME);
+            }
             if (!strcmp(uri, "/1key")) return send_html_raw(req, String("<h1>ok</h1>") + JS2HOME);
             // pause / resume / volp / volm -> 只回 js2back
             return send_html_raw(req, JS2BACK);

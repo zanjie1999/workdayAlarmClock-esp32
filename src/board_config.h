@@ -65,9 +65,9 @@
 
 // ---------------- 屏幕调试开关 ----------------
 // LCD_SELFTEST=1 ：开机先闪背光 3 次 + 刷红/绿/蓝自检（不依赖 PSRAM / LVGL）。
-//                 面板确认通了以后改成 0，省 4 秒启动时间。
+//                 2026-11-19 面板/驱动确认通过，默认关闭（置 1 可重新打开）。
 #ifndef LCD_SELFTEST
-#define LCD_SELFTEST 1
+#define LCD_SELFTEST 0
 #endif
 #ifndef LCD_SELFTEST_MS
 #define LCD_SELFTEST_MS 500
@@ -109,10 +109,12 @@
 #define N32_BAUD 460800
 #endif
 
-// ✅ v5 手册 §3.5 实测锁定：0x15 流通道吃 8-bit unsigned PCM @ 22050Hz mono。
-// 16-bit/16k 是早期错误结论，16-bit 送进去必出白噪音。
+// ✅ 参考工程 alphapi_one_audio_codec.cc 实测锁定：N32 芯片播放时钟固定 24000Hz，
+// WAV 头里的采样率必须写 24000（写成别的值会变倍速/变调，参考工程注释原话：
+// "写成 16000 而芯片跑 24k，TTS 会变成 1.5 倍速的尖细声音"）。
+// 0x15 流通道吃 8-bit unsigned mono；16-bit 送进去必出白噪音。
 #ifndef N32_SAMPLE_RATE
-#define N32_SAMPLE_RATE 22050
+#define N32_SAMPLE_RATE 24000
 #endif
 #define N32_SAMPLE_BYTES 1   // 8-bit unsigned
 #define N32_BLOCK_BYTES 200  // 手册: 每块 200 字节

@@ -107,6 +107,89 @@ gen_clock() {
 gen_cjk 16
 gen_cjk 20
 gen_cjk 24
+
+echo "== 3/3 生成常用字兜底库（bpp1 单色，GB2312 一级 3755 字 + 中文标点）=="
+# 为什么单独一档：界面文案（charset.txt，几百字）保持 bpp4 抗锯齿不动；
+# 后端下发的曲名/天气是任意中文，用 bpp1 单色常用字库兜底，缺字时
+# LVGL 沿 .fallback 链查找。只做 16px 一档（位图约 86KB + 描述表），
+# 160×128 设备全部动态文字都走 16px，20/24 的兜底也复用这一档。
+# 注：lv_font_conv 1.5.x 对 lvgl 格式输出的 RLE 压缩实际未启用（实测
+# --no-compress 与默认输出完全一致，bitmap_format=0），无需压缩开关。
+FB_SYMBOLS=$("$PY" - <<'PYEOF'
+chars = []
+for hi in range(0xB0, 0xD8):
+    for lo in range(0xA1, 0xFF):
+        try:
+            chars.append(bytes([hi, lo]).decode('gb2312'))
+        except UnicodeDecodeError:
+            pass
+chars.extend('，。、！？；：“”‘’…—·《》〈〉（）【】℃％')
+seen = set()
+out = []
+for c in chars:
+    if c not in seen and ord(c) > 0x2000:
+        seen.add(c)
+        out.append(c)
+print(''.join(out))
+PYEOF
+)
+
+gen_fb() {
+    local size=$1
+    echo "   cjk_fb $size px"
+    "${LFC[@]}" \
+        --font "$CJK_TTF" \
+        --size "$size" \
+        --bpp 1 \
+        --format lvgl \
+        --no-kerning \
+        --range 0x3000-0x303F \
+        --range 0x3041-0x309F \
+        --range 0x30A0-0x30FF \
+        --range 0xFF66-0xFF9F \
+        --range 0xFF00-0xFF65 \
+        --symbols "$FB_SYMBOLS" \
+        --lv-font-name "font_cjk_fb_$size" \
+        --lv-include lvgl.h \
+        -o "$OUT_DIR/font_cjk_fb_$size.c"
+}
+
+gen_fb 16    # 只做 16px 一档：160×128 上歌名/星期/天气/提示条全部走 font_cjk_16
+             # （TINY 档 fs_top/fs_title 都是 16），20/24 无需独立兜底库；
+             # 三档基础库的 .fallback 都指到 fb_16，大字号里缺字时以 16px 单色显示。
+
+# 给基础字库接 fallback（lv_font_conv 生成的 .fallback 恒为 NULL，这里补上；
+# 已接过线的跳过，脚本可重复执行）
+for SZ in 16 20 24; do
+    "$PY" - "$SZ" <<'PYEOF'
+import sys
+sz = sys.argv[1]
+p = f"src/ui_port/font_cjk_{sz}.c"
+s = open(p, encoding="utf-8").read()
+decl = "LV_FONT_DECLARE(font_cjk_fb_16);"
+old_decl = f"LV_FONT_DECLARE(font_cjk_fb_{sz});"
+if old_decl in s and sz != "16":
+    # 旧版三档兜底库（fb_20/fb_24 已删），统一改指 fb_16
+    s = s.replace(old_decl, decl, 1)
+    s = s.replace(f".fallback = &font_cjk_fb_{sz},", ".fallback = &font_cjk_fb_16,", 1)
+    open(p, "w", encoding="utf-8").write(s)
+    print(f"   repointed fallback font_cjk_fb_{sz} -> font_cjk_fb_16")
+elif decl not in s and ".fallback = &font_cjk_fb_16" not in s:
+    s = s.replace(
+        '#include "lvgl.h"\n#endif',
+        '#include "lvgl.h"\n#endif\n\n/* 常用字兜底库：bpp1 单色（tools/gen_font.sh 生成） */\n' + decl,
+        1,
+    )
+    s = s.replace(
+        ".fallback = NULL,",
+        f".fallback = &font_cjk_fb_{sz},  /* 缺字（如歌名）退到常用字兜底库 */",
+        1,
+    )
+    open(p, "w", encoding="utf-8").write(s)
+    print(f"   patched fallback -> font_cjk_fb_{sz}")
+PYEOF
+done
+
 gen_clock 32    # 秒显示时 40px 在 160 宽上可能放不下，留一档兜底
 gen_clock 40
 gen_clock 48

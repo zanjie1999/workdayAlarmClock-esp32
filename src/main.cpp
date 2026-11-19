@@ -98,7 +98,12 @@ void setup()
     display_set_backlight(80);
     Serial.println("[ boot ] panel ok");
 
-    // 4) LVGL + 界面
+    // 4) 配置存储：LittleFS 挂载必须放在界面之前 ——
+    //    ui_app_init 会读 /littlefs/wac_ui.conf 恢复上次设置，
+    //    以前挂在它后面，开机读文件必然失败回默认，看起来就是"设置没保存"。
+    cfg_begin();
+
+    // 5) LVGL + 界面
     lvgl_init();
     ui_app_init();
     Serial.println("[ boot ] ui ok");
@@ -106,11 +111,10 @@ void setup()
     if (!n32_init()) Serial.println("[ boot ] N32 无响应（音频/按键会不可用）");
     if (!pcm_out_begin()) Serial.println("[ boot ] pcm_out 启动失败");
 
-    cfg_begin();
     net_begin();  // 没有凭据会进 AP 配网，配好自动重启
     time_begin();
 
-    web_server_start(8880);
+    web_server_start(8080);
     player_begin();
     app_cmd_init();  // 内部会起闹钟
     Serial.println("[ boot ] ready");

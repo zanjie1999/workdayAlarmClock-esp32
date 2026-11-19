@@ -5,7 +5,7 @@
 //   Prev  第一次回上一首，第二次顺序播默认歌单，第三次随机当前歌单（PrevRdmFlag）
 //   1key  停止时播默认歌单（再按 prev 进随机），播放时一键急停
 //   Stop  发 ECHO/STOP，闹钟结束时恢复默认音量并补 ALARMSTOP/ALARMOFF
-// 差异（受硬件限制）：没有 EQ、没有天气播报、没有进度上报（POS/DUR 由 UI 自己按秒走）。
+// 差异（受硬件限制）：没有 EQ、没有天气播报；进度走 POS/DUR 事件（解码时长累计）。
 #include "player.h"
 
 #include <LittleFS.h>
@@ -226,6 +226,10 @@ static String name_of_source(const String &v)
     return b;
 }
 
+// 曲名代次：s.name 每次变化 +1（release），等待方 acquire 读。
+// web 端 /next /prev 是异步切歌，靠对比代次等新曲名就绪再回页面。
+static std::atomic<uint32_t> s_name_gen{0};
+
 // 曲名查不到就退回老文案（Go echoSong）
 static void echo_song(const String &id, const String &fallback)
 {
@@ -235,6 +239,7 @@ static void echo_song(const String &id, const String &fallback)
         PLock lk;
         s.name = name;
     }
+    s_name_gen.fetch_add(1, std::memory_order_release);
     send_ev("ECHO " + name);
 }
 
@@ -258,6 +263,15 @@ static std::atomic<bool> s_produced{false};
 static std::atomic<uint32_t> s_gen_live{0};
 static std::atomic<uint32_t> s_stream_gen{0};
 static uint32_t s_pace_rate = 0;
+
+// 播放进度上报（POS/DUR/PLAY 事件，UI 的 event_parse.c 按这个协议消费）：
+//   s_pos_ms      = 本曲已解码的音频时长（毫秒），只在切歌时清零；
+//                   暂停期间不解码，天然停住，UI 端插值也随之停。
+//   s_pos_last    = 上次发 POS 的位置，每满 1s 发一条 POS。
+//   s_pending_dur = wyy 接口带出的歌曲总时长，ctrl_start 消费后发 DUR。
+static std::atomic<uint32_t> s_pos_ms{0};
+static std::atomic<uint32_t> s_pos_last{0};
+static std::atomic<uint32_t> s_pending_dur{0};
 static uint32_t s_pace_audio_ms = 0;
 static uint32_t s_pace_wall0 = 0;
 static int s_fmt_rate = 0;
@@ -289,6 +303,16 @@ static void pcm_cb(MP3FrameInfo &info, short *pcm, size_t len, void *ref)
         s_pace_wall0 = millis();
     }
     s_pace_audio_ms += (uint32_t)(frames * 1000 / (size_t)rate);
+
+    // 进度上报：按解码出的音频时长累计（暂停期间不解码自然停住），每秒一条 POS
+    s_pos_ms.fetch_add((uint32_t)(frames * 1000 / (size_t)rate));
+    uint32_t pos = s_pos_ms.load();
+    if (pos - s_pos_last.load() >= 1000) {
+        s_pos_last.store(pos);
+        char b[20];
+        snprintf(b, sizeof(b), "POS %u", (unsigned)pos);
+        send_ev(b);
+    }
     uint32_t wall = millis() - s_pace_wall0;
     if (s_pace_audio_ms > wall + 60) {
         uint32_t d = s_pace_audio_ms - wall - 60;
@@ -474,6 +498,18 @@ static void ctrl_start(const String &url)
         }
     }
     ALOG("player", "开始播放 %s", url.c_str());
+
+    // 进度链路：PLAY 让 UI 清零进度并置播放态，DUR 给进度条总长（流/本地文件可能未知=0），
+    // POS 之后由解码回调每秒上报。RESUME 兜底刷新状态。
+    s_pos_ms.store(0);
+    s_pos_last.store(0);
+    uint32_t dur = s_pending_dur.exchange(0);
+    app_bus_event(("PLAY " + url).c_str());
+    if (dur) {
+        char b[24];
+        snprintf(b, sizeof(b), "DUR %u", (unsigned)dur);
+        app_bus_event(b);
+    }
     app_bus_event("RESUME");
 }
 
@@ -487,6 +523,7 @@ static void do_stop()
         nid = s.now_id;
         nurl = s.now_url;
         s.name = "";
+        s_name_gen.fetch_add(1, std::memory_order_release);
         s.alarm = false;
         s.loop = false;
         s.loop_mode = PLAYER_LOOP_SEQUENTIAL;
@@ -599,13 +636,16 @@ static void ctrl_next(bool from_done)
                 PLock lk;
                 s.name = name_of_source(item);
             }
+            s_name_gen.fetch_add(1, std::memory_order_release);
             send_ev("ECHO " + name_of_source(item));
             return;
         }
 
         send_ev("SONGID " + item);
         String url;
-        if (wyy_song_url(item, &url)) {
+        uint32_t dur = 0;
+        if (wyy_song_url(item, &url, &dur)) {
+            s_pending_dur.store(dur);
             ctrl_start(url);
             {
                 PLock lk;
@@ -670,10 +710,12 @@ static void ctrl_play_music(const String &id)
     echo_song(id, "正在播放");
 
     String url;
-    if (!wyy_song_url(id, &url)) {
+    uint32_t dur = 0;
+    if (!wyy_song_url(id, &url, &dur)) {
         ALOG("player", "播放歌曲失败: %s", id.c_str());
         return;
     }
+    s_pending_dur.store(dur);
     ctrl_start(url);
     {
         PLock lk;
@@ -809,6 +851,13 @@ static void ctrl_resume()
         s.paused = false;
     }
     app_bus_event("RESUME");
+    // 暂停期间 UI 的插值停在旧 POS 基准上，恢复后立即重发当前进度重锚定，
+    // 否则进度条会按墙钟时间跳过暂停的那一段。
+    {
+        char b[20];
+        snprintf(b, sizeof(b), "POS %u", (unsigned)s_pos_ms.load());
+        app_bus_event(b);
+    }
     ALOG("player", "继续");
 }
 
@@ -1043,6 +1092,11 @@ int player_vol()
     if (!s_mu) return 50;
     PLock lk;
     return s.vol;
+}
+
+uint32_t player_name_gen(void)
+{
+    return s_name_gen.load(std::memory_order_acquire);
 }
 
 String player_now_url()

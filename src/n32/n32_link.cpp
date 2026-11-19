@@ -428,7 +428,7 @@ static bool write_audio_chunk_locked(const uint8_t *data, size_t len, uint8_t &a
     return true;
 }
 
-// 44 字节标准 WAV 头：PCM / 单声道 / 22050Hz / 8bit，长度字段 0xFFFFFFFF（流式）。
+// 44 字节标准 WAV 头：PCM / 单声道 / 24000Hz / 8bit，长度字段 0xFFFFFFFF（流式）。
 // 采样率必须和喂进来的 PCM 一致，N32 按头里的字段配置播放通路。
 static bool send_wav_header_locked(void)
 {
@@ -517,8 +517,9 @@ static bool configure_output_locked(void)
     return ok;
 }
 
-// ✅ v5 手册 §3.5：N32 0x15 流通道吃 8-bit unsigned PCM @ 22050Hz mono。
-// 输入是内部统一的 s16 mono（22050Hz，由 pcm_out 重采样保证），
+// ✅ N32 0x15 流通道吃 8-bit unsigned PCM @ 24000Hz mono（芯片固定时钟，
+// 参考工程 alphapi_one_audio_codec.cc 同款）。
+// 输入是内部统一的 s16 mono（24000Hz，由 pcm_out 重采样保证），
 // 这里做 s16 -> u8 转换（加 0x8000 直流偏置取高字节）。
 // 流控完全对齐参考工程：每块等 0x91 应答，accepted 是多少前进多少；
 // 超时当整块收下继续（绝不重发）；首次写自动走完整起播序列（WAV 头）。

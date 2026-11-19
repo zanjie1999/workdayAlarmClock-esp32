@@ -8,6 +8,7 @@
 #include "app_config.h"
 #include "app_net.h"
 #include "player.h"
+#include "../web/web_weather.h"
 
 static bool s_started = false;
 static bool s_wd_err = true;       // 工作日接口是否出错（对应 WorkDayApiErr）
@@ -247,6 +248,18 @@ void alarm_tick()
 
     // 出错每分钟重试（刚开机没网 / 时间刚到 2025+ 都走这里），换日也刷一次
     if (s_wd_err || hhmm == "0000") workday_refresh();
+
+    // 天气（对齐 Go 定时器）：开机时间同步成功后先拉一次，之后每小时整点拉一次；
+    // weather_refresh 内部有"本小时已拉过"节流，成功后给 LVGL 发 WEATHER/WEATHERAL
+    {
+        static bool s_wx_boot = false;
+        if (!s_wx_boot) {
+            s_wx_boot = true;
+            weather_refresh();
+        } else if (hhmm.length() == 4 && hhmm.endsWith("00")) {
+            weather_refresh();
+        }
+    }
 
     String ymd = time_ymd(false);
     String mmdd = ymd.length() == 8 ? ymd.substring(4, 8) : String();

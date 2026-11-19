@@ -48,7 +48,7 @@ volatile int s_active = 0;
 BqState s_state[kMaxFilters];
 
 eq_settings_t s_cur;
-float s_rate = 22050.0f;   // ✅ v5 手册 §3.5：N32 播放通路实际采样率
+float s_rate = 24000.0f;   // ✅ N32 播放通路实际采样率（参考工程同款 24000）
 bool s_loaded = false;
 
 // 虚拟低音强度 100 对应额外抬升 12dB；再高一点对小喇叭就开始糊了。

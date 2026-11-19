@@ -1012,6 +1012,15 @@ int do_put(WiFiClient *c, const WebDavReq &req, const char *fs, size_t &bytes)
         return 405;
     }
 
+    // macOS Finder 拷贝时会附带 ._ 开头的 AppleDouble 资源叉文件，
+    // 纯垃圾（之前把壁纸传成 0 字节就是它捣乱），直接拒绝
+    const char *base = strrchr(fs, '/');
+    if (base && !strncmp(base + 1, "._", 2)) {
+        http_error(c, 403, "AppleDouble (._) files are not allowed");
+        dav_log(req.method, req.path, 403, 0);
+        return 403;
+    }
+
     char parent[kPathMax];
     if (!parent_dir(fs, parent) || !ensure_dirs(parent)) {
         http_error(c, 409, "parent unavailable");

@@ -397,15 +397,16 @@ void do_aplay(Conn *k, HttpReq *rq, uint32_t t0)
     body_init(&body, k, rq);
 
     size_t total = 0;
-    uint8_t hold = 0;
-    bool has_hold = false;
+    const size_t frame_bytes = (size_t)channels * 2;  // 一个声道帧的 s16 字节数
+    uint8_t hold[16];                                 // 跨块残缺帧（最多 frame_bytes-1 字节）
+    size_t hold_n = 0;
 
     for (;;) {
         uint32_t waited = 0;
         size_t off = 0;
-        if (has_hold) {
-            ((uint8_t *)s_pcm_buf)[0] = hold;
-            off = 1;
+        if (hold_n) {
+            memcpy((uint8_t *)s_pcm_buf, hold, hold_n);
+            off = hold_n;
         }
         const int n = body_read(&body, (uint8_t *)s_pcm_buf + off, sizeof(s_pcm_buf) - off,
                                 &waited);
@@ -420,11 +421,17 @@ void do_aplay(Conn *k, HttpReq *rq, uint32_t t0)
         }
 
         size_t bytes = (size_t)n + off;
-        has_hold = false;
-        if (bytes & 1) {  // s16 半个样本留到下一次
-            hold = ((uint8_t *)s_pcm_buf)[bytes - 1];
-            has_hold = true;
-            bytes--;
+        if (bytes >= frame_bytes) {
+            // 帧尾不齐的部分留到下一块拼整帧（立体声下半个样本/半帧都可能出现）
+            const size_t rem = bytes % frame_bytes;
+            memcpy(hold, (uint8_t *)s_pcm_buf + bytes - rem, rem);
+            hold_n = rem;
+            bytes -= rem;
+        } else {
+            // 整块不足一帧（罕见），全部留待下一块
+            memcpy(hold, (uint8_t *)s_pcm_buf, bytes);
+            hold_n = bytes;
+            continue;
         }
         if (!bytes) continue;
 
@@ -759,6 +766,10 @@ void handle_client(Conn *k)
         }
     } else if (!strcmp(rq.path, "/") || !strcmp(rq.path, "/index.html")) {
         do_root(k, &rq, t0);
+    } else if (!strcmp(rq.path, "/volp") || !strcmp(rq.path, "/volm")) {
+        // 上位机音量 +/-：加一减一由上位机自己算好调 /volp /volm，这里只应答
+        http_json(k, 200, "{\"ok\":true}");
+        log_req(k, &rq, 200, 14, t0);
     } else if (!strncmp(rq.path, "/flash", 6) || !strncmp(rq.path, "/music", 6)) {
         do_webdav(k, &rq, t0);
     } else {
@@ -774,7 +785,7 @@ void handle_client(Conn *k)
 WiFiServer *s_server = nullptr;
 TaskHandle_t s_task = nullptr;
 volatile bool s_running = false;
-uint16_t s_port = 8880;
+uint16_t s_port = 8080;
 
 void web_task(void *)
 {
@@ -834,7 +845,10 @@ void web_server_start(uint16_t port)
     if (s_task) return;
     s_port = port;
     if (!s_running) {
-        xTaskCreatePinnedToCore(web_task, "http", 8192, nullptr, 4, &s_task, 0);
+        // 栈 12288：WebDAV 的 GET/PUT 在栈上放 4KB 文件缓冲（webdav.cpp），
+        // 加请求解析/路径缓冲曾经顶爆 8192 → 任务栈溢出崩溃重启（表现是
+        // PROPFIND 正常、GET/PUT 无响应断连，串口有 stack overflow in task http）。
+        xTaskCreatePinnedToCore(web_task, "http", 12288, nullptr, 4, &s_task, 0);
     }
 }
 

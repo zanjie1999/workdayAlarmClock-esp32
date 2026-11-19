@@ -68,7 +68,7 @@ extern "C" void ui_app_init(void)
     wac_state_init();
 
     // 5) 界面选项（读不到文件就用默认值：显示秒 / 不显示电量 / 12 小时制）
-    ui_set_load("/wac_ui.conf");
+    ui_set_load("/littlefs/wac_ui.conf"); /* LittleFS 挂载点 /littlefs（app_config.cpp），根目录没有 VFS */
 
     // 6) 视觉层 -> 页面
     theme_init();

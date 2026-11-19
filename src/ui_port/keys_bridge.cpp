@@ -16,8 +16,9 @@
 // 注意：音量加减在这个方案里没有专键，走设置页/播放页的焦点调节（原设计如此）。
 //
 // N32 的寄存器（见 n32_link.h）：
-//   n32_read_keys(&ab)  低电平有效，A=bit2(0x04) B=bit3(0x08)
+//   n32_read_keys(&ab)  高电平有效，A=bit2(0x04) B=bit3(0x08)
 //   n32_read_lr(&lr)    高电平有效，L=bit1(0x02) R=bit0(0x01)
+//   （参考工程 config.h 四个键全部是"置位=按下"）
 // 读失败（UART 忙/超时）时**保持上一次状态**，不能把"没读到"当成"全松开"。
 #include <string.h>
 
@@ -150,8 +151,11 @@ void poll_n32(void)
     }
 
     if (ok_ab) {
-        const bool a = (ab & N32_KEY_A) == 0; // 低电平有效
-        const bool b = (ab & N32_KEY_B) == 0;
+        // 高电平有效：参考工程 config.h KEY_BIT_A=0x04/B=0x08 全部是
+        // "置位=按下"。之前误写成低有效，空闲 0x00 会让 A/B 永远"按下"，
+        // 600ms 后必发 KEY_LONG + 连发 + 每 5s stuck reset。
+        const bool a = (ab & N32_KEY_A) != 0;
+        const bool b = (ab & N32_KEY_B) != 0;
         if (a != s_prev_a) {
             s_prev_a = a;
             on_code(CODE_A, a, "n32");

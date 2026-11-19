@@ -32,7 +32,7 @@
 #define N32_SWAP_TX_RX 0
 #endif
 
-#define N32_ACK_TIMEOUT_MS 20   // 单块 ACK 超时（1Mbps 下一帧 ~30us，留足余量）
+#define N32_ACK_TIMEOUT_MS 8    // 单块 ACK 超时：发 200B 约 4.4ms + ACK 回传几 ms。厂商驱动是 send+300us+read(3)，等效非阻塞等 ACK；这里 8ms 足够且不拖实时
 #define N32_READ_TIMEOUT_MS 20
 #define N32_PROBE_TIMEOUT_MS 30 // 单次探测等应答的上限，别把启动卡住
 #define N32_PROBE_WINDOW_MS 2000
@@ -58,8 +58,12 @@ struct HexLog {
 static HexLog s_log_tx = {0, 0, 0, false};
 static HexLog s_log_rx = {0, 0, 0, false};
 
+__attribute__((unused))
 static void log_frame(const char *tag, HexLog &st, const uint8_t *b, size_t n)
 {
+    // 统一在这里过滤，不依赖调用点：按键轮询(reg 0x00)和音频流(0x15)
+    // 一个 20ms 一次、一个每秒 160 次，任何一处漏掉都会刷屏。
+    if (n >= 2 && (b[1] == 0x00 || b[1] == 0x15)) return;
     uint32_t h = 2166136261u;
     for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 16777619u; }
 
@@ -87,18 +91,30 @@ static void log_frame(const char *tag, HexLog &st, const uint8_t *b, size_t n)
     Serial.printf("[n32] %s: %s%s(%uB)\n", tag, out, (n > lim) ? "... " : "", (unsigned)n);
 }
 
-// 音频流每秒 160 帧，逐帧 hexdump 会把串口彻底刷死（想看的日志全被冲掉）。
-// 只在该流的第一帧提示一次，之后静默；其它命令照常打印。
+// 逐帧 hexdump 只用于查协议，平时一律不打：
+// 音频 160 帧/秒 + 按键 20ms 一次（一次还读两遍）会把串口刷死，
+// 真正有用的 [pcm]/[lcd]/[net] 全被冲掉。要查协议时把 N32_LOG_VERBOSE 改 1。
+#ifndef N32_LOG_VERBOSE
+#define N32_LOG_VERBOSE 0
+#endif
 static inline void log_tx(const uint8_t *b, size_t n)
 {
+#if N32_LOG_VERBOSE
     if (n >= 2 && b[0] == 0x90 && b[1] == 0x15) return;   // 音频流整段静默
     log_frame("tx", s_log_tx, b, n);
+#else
+    (void)b; (void)n;
+#endif
 }
 
 static inline void log_rx(const uint8_t *b, size_t n)
 {
+#if N32_LOG_VERBOSE
     if (n >= 2 && b[0] == 0x91 && b[1] == 0x15) return;   // 音频流 ACK 不打印
     log_frame("rx", s_log_rx, b, n);
+#else
+    (void)b; (void)n;
+#endif
 }
 
 // ---------------------------------------------------------------- 底层收发
@@ -127,17 +143,6 @@ static void drain_locked(void)
 
 // 等写命令的 0x91 addr cksum。接收侧可能混进上一次的迟到响应，
 // 所以逐字节找帧头，不匹配就丢掉重找，不做 flush。
-// 音频帧不逐帧等 ACK，ACK 会堆在 RX 缓冲里变成"迟到的脏字节"，
-// 下一次读按键/读寄存器时就会把 91 15 c8 当成应答读走（日志里出现的
-// "rx: 91 15 c8 91 15 c8 (6B)" 就是这个）。发完音频后主动清一次。
-static void drain_rx(void)
-{
-    uint8_t tmp[16];
-    int guard = 0;
-    while (guard++ < 4) {
-        if (!get_byte(&tmp[0], millis() + 1)) break;
-    }
-}
 
 static bool wait_ack_locked(uint8_t addr, uint32_t timeout_ms)
 {
@@ -336,9 +341,8 @@ bool n32_init(void)
     delay(150);
 
     // 候选波特率：460929 是厂商驱动实测值（drivers/n32_audio.py 默认），
-    // 1Mbps 是小智固件/board_config 的默认，115200 兜底。
-    // 460929 放第一：这块板实测只认它（1M/115200 共 14 次全无应答）。
-    // 1M 虽然带宽余量更好，但这颗 N32 不应答，排前面只是白等 7 秒开机时间。
+    // 1M 曾导致 N32 卡死 + 系统无响应（实测 1M 下 N32 通信异常），
+    // 回退到 460929（实测稳定）。音频卡顿靠加大缓冲解决，不冒险用 1M。
     static const uint32_t bauds[] = {460929u, 1000000u, 115200u};
     const size_t nbaud = sizeof(bauds) / sizeof(bauds[0]);
 
@@ -465,23 +469,42 @@ size_t n32_write_pcm(const int16_t *samples, size_t count)
     size_t total = count * sizeof(int16_t);
     size_t done = 0;
 
-    // N32 只收整 200 字节块，不足一块的尾巴留在调用方的环形缓冲里。
-    //
-    // 音频帧**不等 ACK**：厂商驱动写 0x15 完全不看应答。如果每帧都等，
-    // 每秒 160 帧 × 一次超时，发送节奏立刻被拖死——听感就是"放一下就停"。
-    bool prev_ack = s_ack_required;
-    s_ack_required = false;
-    while (done + N32_BLOCK_BYTES <= total) {
-        write_reg_locked(0x15, bytes + done, N32_BLOCK_BYTES, 10);  // 10ms 只等发送完成、不等 ACK
-        done += N32_BLOCK_BYTES;
-        drain_rx();      // 把迟到的 91 15 c8 清掉，免得污染后面的按键读
+    // 诊断计数：每秒汇总一次发送结果，定位"断流"发生在哪一步
+    static uint32_t st_sent = 0, st_fail = 0, st_ackless = 0, st_last = 0;
+
+    // N32 音频帧必须等 ACK——厂商驱动 write_pcm 每帧 read(3) 读回 ACK，这就是流控。
+    while (done < total) {
+        uint8_t block[N32_BLOCK_BYTES];
+        size_t blk = total - done;
+        if (blk > N32_BLOCK_BYTES) blk = N32_BLOCK_BYTES;
+        memcpy(block, bytes + done, blk);
+        if (blk < N32_BLOCK_BYTES) memset(block + blk, 0, N32_BLOCK_BYTES - blk);
+
+        if (!write_reg_locked(0x15, block, N32_BLOCK_BYTES, N32_ACK_TIMEOUT_MS)) {
+            uint8_t alive = 0;
+            if (read_reg_locked(0x00, 1, &alive, N32_READ_TIMEOUT_MS)) {
+                s_ack_required = false;
+                st_ackless++;
+                if (st_ackless == 1)
+                    Serial.println("[n32] 音频写无 ACK 但读有应答 -> 切免 ACK 模式");
+            } else {
+                st_fail++;
+                if (st_fail == 1)
+                    Serial.printf("[n32] pcm 写失败 @%u/%u baud=%u\n",
+                                  (unsigned)done, (unsigned)total, (unsigned)s_baud);
+                break;
+            }
+        }
+        st_sent++;
+        done += blk;
     }
-    s_ack_required = prev_ack;
-    // 块与块之间插一次读键：按键和音频共用这条线，没有独立中断。
-    // （放在循环外统一读，避免每帧都打断发送节奏）
-    if (done >= N32_BLOCK_BYTES) {
-        uint8_t v;
-        read_reg_locked(0x00, 1, &v, 2);
+
+    if ((uint32_t)(millis() - st_last) >= 1000) {
+        st_last = millis();
+        Serial.printf("[n32] pcm 统计: 发%u帧 免ACK%u 失败%u ack_req=%d\n",
+                      (unsigned)st_sent, (unsigned)st_ackless, (unsigned)st_fail,
+                      s_ack_required ? 1 : 0);
+        st_sent = st_fail = st_ackless = 0;
     }
 
     xSemaphoreGive(s_mutex);

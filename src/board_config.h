@@ -40,6 +40,14 @@
 #define LCD_SPI_HZ 40000000
 #endif
 
+// 屏幕型号：0 = ST7789（当前这块板，备份固件确认为 ST7789 C 驱动），
+//           1 = ST7735S（另一块备用，排线丝印 fxd018qq8）
+// 备份固件（MicroPython 1.19.1 + ESP-IDF v4.4.1）里是 C 实现的 ST7789 驱动
+//（printf 串 "<ST7789 width=%u...>" 可证），用 esp_lcd 官方初始化序列。
+#ifndef LCD_PANEL_ST7735
+#define LCD_PANEL_ST7735 0
+#endif
+
 // 屏的显存偏移（部分 128x160 模组需要 1~3 像素偏移，花屏/错位时调这里）
 #ifndef LCD_X_OFFSET
 #define LCD_X_OFFSET 0

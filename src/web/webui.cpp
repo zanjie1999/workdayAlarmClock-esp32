@@ -405,9 +405,10 @@ static esp_err_t h_music_mp3(httpd_req_t *req)
 
 static esp_err_t h_dispatch(httpd_req_t *req)
 {
-    // 空表单提交会得到 "/resume?" 这种"带问号但没有参数"的 URI，
-    // 直接 strcmp 会失配。这里**只去掉末尾的空问号**，
-    // 带参数的（"/play?url=..."）原样保留，交给 handler 自己解析查询串。
+    // 前端会给请求加缓存穿透参数：/status?t=1795034696361。
+    // 路由比对必须只看路径部分，否则一律 404。
+    // 注意：只用于**匹配**，req->uri 原样不动，handler 里
+    // httpd_req_get_url_query_str() 取查询串仍然正常。
     static char pathbuf[192];
     const char *uri = req->uri;
     {
@@ -415,6 +416,8 @@ static esp_err_t h_dispatch(httpd_req_t *req)
         if (n >= sizeof pathbuf) n = sizeof pathbuf - 1;
         memcpy(pathbuf, uri, n);
         pathbuf[n] = 0;
+        char *q = strchr(pathbuf, '?');
+        if (q) *q = 0;                      // 裁掉查询串，只留路径
         size_t m = strlen(pathbuf);
         while (m > 1 && pathbuf[m - 1] == '?') pathbuf[--m] = 0;
         uri = pathbuf;
@@ -433,7 +436,11 @@ static esp_err_t h_dispatch(httpd_req_t *req)
         return e;
     }
 
-    // 无参数的播放控制，全部等价于 UI 发一行命令
+    // 无参数的播放控制。返回内容逐条对齐 Go router.go：
+    //   /stop     -> "<h1>stop</h1>" + js2home
+    //   /next     -> "<h2>" + Next()  + "</h2>" + js2home
+    //   /prev     -> "<h2>" + Prev()  + "</h2>" + js2home
+    //   /pause /resume /volp /volm -> js2back（纯返回上一页脚本，不带内容）
     static const struct {
         const char *uri;
         const char *cmd;
@@ -445,8 +452,12 @@ static esp_err_t h_dispatch(httpd_req_t *req)
     for (size_t i = 0; i < sizeof kCmds / sizeof kCmds[0]; i++) {
         if (!strcmp(uri, kCmds[i].uri)) {
             app_cmd_feed(kCmds[i].cmd);
+            if (!strcmp(uri, "/stop")) return send_html_raw(req, String("<h1>stop</h1>") + JS2HOME);
+            if (!strcmp(uri, "/next")) return send_html_raw(req, String("<h2>") + player_now_playing() + "</h2>" + JS2HOME);
+            if (!strcmp(uri, "/prev")) return send_html_raw(req, String("<h2>") + player_now_playing() + "</h2>" + JS2HOME);
             if (!strcmp(uri, "/1key")) return send_html_raw(req, String("<h1>ok</h1>") + JS2HOME);
-            return send_ok(req);
+            // pause / resume / volp / volm -> 只回 js2back
+            return send_html_raw(req, JS2BACK);
         }
     }
 

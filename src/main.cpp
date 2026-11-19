@@ -75,7 +75,8 @@ void setup()
 {
     Serial.begin(115200);
     delay(300);
-    Serial.printf("\n[ boot ] AlphaPi One, psram=%u KB, flash=%u MB\n",
+    Serial.printf("\n[ boot ] build %s %s\n", __DATE__, __TIME__);
+    Serial.printf("[ boot ] AlphaPi One, psram=%u KB, flash=%u MB\n",
                   (unsigned)(ESP.getPsramSize() / 1024), (unsigned)(ESP.getFlashChipSize() >> 20));
 
     // 1) 背光通路：只动 BL 一脚，不依赖 PSRAM / LVGL / SPI。

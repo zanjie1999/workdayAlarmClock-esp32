@@ -21,7 +21,9 @@
 #include <SPI.h>
 
 #if LCD_SPI_USE_SAFE
-#define LCD_BUS_HZ LCD_SPI_HZ_SAFE
+// 这里原来写死成 LCD_SPI_HZ_SAFE(10MHz)，导致 platformio.ini 里的
+// -DLCD_SPI_HZ=40MHz 完全无效（日志一直显示 10MHz 就是这个原因）。
+#define LCD_BUS_HZ LCD_SPI_HZ
 #else
 #define LCD_BUS_HZ LCD_SPI_HZ
 #endif
@@ -30,8 +32,10 @@
 
 // 窗口恒等于逻辑尺寸，与旋转无关，所以这里没有"旋转奇偶 vs 宽高"的约束要检查。
 
-// FSPI 在 S3 上就是 SPI2_HOST，走 GPIO matrix 可以任意挑脚
-static SPIClass s_spi(FSPI);
+// 用 HSPI(=SPI3_HOST)：drivers/st7789.py 写 SPI(2)，MicroPython 的 SPI(2)
+// 在 ESP32-S3 上对应 SPI3_HOST（HSPI），不是 SPI2_HOST（FSPI）。
+// Arduino core 里 HSPI=1 映射到 SPI3_HOST。之前用 FSPI 是错的。
+static SPIClass s_spi(HSPI);
 
 static bool     s_ready    = false;
 static bool     s_bl_ready = false;
@@ -50,14 +54,18 @@ static inline void bus_release() { s_spi.endTransaction(); }
 
 // ---------------------------------------------------------------- 旋转
 
-// ST7789 MADCTL（不翻色）：MY=0x80 MX=0x40 MV=0x20
+// ST77xx 家族 MADCTL 位定义统一：MY=0x80 MX=0x40 MV=0x20 BGR=0x08 MH=0x04
 static uint8_t madctl_for(uint8_t rot)
 {
+    uint8_t base = 0x00;
+#if LCD_PANEL_ST7735
+    base = 0x08;  // ST7735 玻璃是 BGR 排列，必须加 BGR 位，否则红蓝互换
+#endif
     switch (rot & 3) {
-        case 1:  return 0x60;  // MV|MX  横屏
-        case 2:  return 0xC0;  // MX|MY  竖屏倒置
-        case 3:  return 0xA0;  // MV|MY  横屏反向
-        default: return 0x00;  // 竖屏
+        case 1:  return base | 0x60;  // MV|MX  横屏
+        case 2:  return base | 0xC0;  // MX|MY  竖屏倒置
+        case 3:  return base | 0xA0;  // MV|MY  横屏反向
+        default: return base | 0x00;  // 竖屏
     }
 }
 
@@ -126,43 +134,68 @@ static void f_pixels(void *data, size_t bytes)
 }
 
 // ---------------------------------------------------------------- 初始化序列
+//
+// 两块屏的驱动并存，用 LCD_PANEL_ST7735 宏切换：
+//   LCD_PANEL_ST7735=0  -> ST7789（AlphaPi One 的另一块板）
+//   LCD_PANEL_ST7735=1  -> ST7735S（当前这块，排线丝印 fxd018qq8，1.8" 128x160）
+// 两者命令集不兼容，混用会导致纯白/无显示。
 
+#if LCD_PANEL_ST7735
+// ============================================================
+// ST7735S —— 对照 Adafruit ST7735 库 B 型序列（Bcmd[]）
+// ============================================================
 static void panel_init_seq(void)
 {
-    static const uint8_t porch[]   = {0x0C, 0x0C, 0x00, 0x33, 0x33};
-    static const uint8_t pwr1[]    = {0xA4, 0xA1};
-    static const uint8_t gamma_p[] = {0xD0, 0x04, 0x0D, 0x11, 0x13, 0x2B, 0x3F,
-                                      0x54, 0x4C, 0x18, 0x0D, 0x0B, 0x1F, 0x23};
-    static const uint8_t gamma_n[] = {0xD0, 0x04, 0x0C, 0x11, 0x13, 0x2C, 0x3F,
-                                      0x44, 0x51, 0x2F, 0x1F, 0x1F, 0x20, 0x23};
-
     wr_cmd(0x01);          // SWRESET
-    delay(150);
+    delay(50);
+
     wr_cmd(0x11);          // SLPOUT
-    delay(120);            // 手册要求 >=120ms，少给会白屏/不亮
+    delay(120);            // ST7735 要求 >=120ms
 
-    wr_cmd_u8(0x36, s_madctl);  // MADCTL：横屏在这里，不是 0x00
-    wr_cmd_u8(0x3A, 0x55);      // COLMOD RGB565
+    wr_cmd_u8(0x3A, 0x05); // COLMOD 16-bit RGB565
+    delay(10);
 
-    wr_cmd_data(0xB2, porch, sizeof(porch));   // PORCTRL
-    wr_cmd_u8(0xB7, 0x35);     // GCTRL
-    wr_cmd_u8(0xBB, 0x19);     // VCOMS（对齐厂商驱动，原为 0x1F）
-    wr_cmd_u8(0xC0, 0x2C);     // LCMCTRL
-    wr_cmd_u8(0xC2, 0x01);     // VDVVRHEN
-    wr_cmd_u8(0xC3, 0x12);     // VRHS
-    wr_cmd_u8(0xC4, 0x20);     // VDVS
-    wr_cmd_u8(0xC6, 0x0F);     // FRCTRL2 60Hz
-    wr_cmd_data(0xD0, pwr1, sizeof(pwr1));     // PWCTRL1
-    wr_cmd_data(0xE0, gamma_p, sizeof(gamma_p));
-    wr_cmd_data(0xE1, gamma_n, sizeof(gamma_n));
+    static const uint8_t frmctr1[] = {0x00, 0x06, 0x03};
+    wr_cmd_data(0xB1, frmctr1, 3);   // FRMCTR1
+    delay(10);
 
-#if LCD_INVERT
-    wr_cmd(0x21);          // INVON
-#else
-    wr_cmd(0x20);          // INVOFF
-#endif
+    wr_cmd_u8(0x36, s_madctl);       // MADCTL
 
-    // 先把窗口设满，避免残留地址窗口把后面的 RAMWR 写到屏外
+    static const uint8_t disset5[] = {0x15, 0x02};
+    wr_cmd_data(0xB6, disset5, 2);   // DISSET5
+
+    wr_cmd_u8(0xB4, 0x00);           // INVCTR
+
+    static const uint8_t pwctr1[] = {0x02, 0x70};
+    wr_cmd_data(0xC0, pwctr1, 2);    // PWCTR1
+    delay(10);
+
+    wr_cmd_u8(0xC1, 0x05);           // PWCTR2
+
+    static const uint8_t pwctr3[] = {0x01, 0x02};
+    wr_cmd_data(0xC2, pwctr3, 2);    // PWCTR3
+
+    static const uint8_t vmctr1[] = {0x3C, 0x38};
+    wr_cmd_data(0xC5, vmctr1, 2);    // VMCTR1
+    delay(10);
+
+    static const uint8_t pwctr6[] = {0x11, 0x15};
+    wr_cmd_data(0xFC, pwctr6, 2);    // PWCTR6
+
+    // GMCTRP1 正 gamma（16 字节）
+    static const uint8_t gamma_p[] = {
+        0x09, 0x16, 0x09, 0x20, 0x21, 0x1B, 0x13, 0x19,
+        0x17, 0x15, 0x1E, 0x2B, 0x04, 0x05, 0x02, 0x0E};
+    wr_cmd_data(0xE0, gamma_p, 16);
+
+    // GMCTRN1 负 gamma（16 字节）
+    static const uint8_t gamma_n[] = {
+        0x0B, 0x14, 0x08, 0x1E, 0x22, 0x1D, 0x18, 0x1E,
+        0x1B, 0x1A, 0x24, 0x2B, 0x06, 0x06, 0x02, 0x0F};
+    wr_cmd_data(0xE1, gamma_n, 16);
+    delay(10);
+
+    // 窗口
     const uint8_t caset[4] = {0x00, 0x00, (uint8_t)((s_w - 1) >> 8), (uint8_t)(s_w - 1)};
     const uint8_t raset[4] = {0x00, 0x00, (uint8_t)((s_h - 1) >> 8), (uint8_t)(s_h - 1)};
     wr_cmd_data(0x2A, caset, 4);
@@ -170,9 +203,70 @@ static void panel_init_seq(void)
 
     wr_cmd(0x13);          // NORON
     delay(10);
+
     wr_cmd(0x29);          // DISPON
-    delay(50);             // DISPON 之后要给面板一点时间
+    delay(100);
 }
+
+#else
+// ============================================================
+// ST7789 —— 对照 ESP-IDF 官方 esp_lcd_panel_st7789.c 默认序列
+// （备份固件 = MicroPython 1.19.1 + IDF v4.4.1，用的就是这套）
+// 关键：之前照抄 drivers/st7789.py 的序列是错的（B7=0x35 应为 0x45、
+// BB=0x19 应为 0x2B、C3=0x12 应为 0x11、gamma 完全不同），导致纯白。
+// ============================================================
+static void panel_init_seq(void)
+{
+    wr_cmd(0x01);           // SWRESET 软件复位（esp_lcd 里 panel_init 单独发）
+    delay(150);
+
+    wr_cmd(0x11);           // SLPOUT
+    delay(120);
+
+    wr_cmd_u8(0x36, s_madctl);   // MADCTL（用目标旋转值，rot=1 时 0x60 横屏）
+    wr_cmd_u8(0x3A, 0x55);   // COLMOD RGB565
+
+    static const uint8_t porch[] = {0x0C, 0x0C, 0x00, 0x33, 0x33};
+    wr_cmd_data(0xB2, porch, 5);   // PORCTRL
+
+    wr_cmd_u8(0xB7, 0x45);   // GCTRL（官方 0x45，不是 drivers 的 0x35）
+    wr_cmd_u8(0xBB, 0x2B);   // VCOMS（官方 0x2B，不是 drivers 的 0x19）
+    wr_cmd_u8(0xC0, 0x2C);   // LCMCTRL
+
+    static const uint8_t vdv[] = {0x01, 0xFF};
+    wr_cmd_data(0xC2, vdv, 2);    // VDVVRHEN（官方带 2 参数 01 FF）
+
+    wr_cmd_u8(0xC3, 0x11);   // VRHS（官方 0x11，不是 drivers 的 0x12）
+    wr_cmd_u8(0xC4, 0x20);   // VDVS
+    wr_cmd_u8(0xC6, 0x0F);   // FRCTRL2
+
+    static const uint8_t pwr1[] = {0xA4, 0xA1};
+    wr_cmd_data(0xD0, pwr1, 2);   // PWCTRL1
+
+    // 官方正 gamma（14 字节）
+    static const uint8_t gamma_p[] = {
+        0xD0, 0x00, 0x05, 0x0E, 0x15, 0x0D, 0x37,
+        0x43, 0x47, 0x09, 0x15, 0x12, 0x16, 0x19};
+    wr_cmd_data(0xE0, gamma_p, 14);
+
+    // 官方负 gamma（14 字节）
+    static const uint8_t gamma_n[] = {
+        0xD0, 0x00, 0x05, 0x0D, 0x0C, 0x06, 0x2D,
+        0x44, 0x40, 0x0E, 0x1C, 0x18, 0x16, 0x19};
+    wr_cmd_data(0xE1, gamma_n, 14);
+
+    wr_cmd(0x21);          // INVON（反色开，esp_lcd 默认 invert_color=true）
+    wr_cmd(0x29);          // DISPON
+    delay(50);
+
+    // 窗口
+    const uint8_t caset[4] = {0x00, 0x00, (uint8_t)((s_w - 1) >> 8), (uint8_t)(s_w - 1)};
+    const uint8_t raset[4] = {0x00, 0x00, (uint8_t)((s_h - 1) >> 8), (uint8_t)(s_h - 1)};
+    wr_cmd_data(0x2A, caset, 4);
+    wr_cmd_data(0x2B, raset, 4);
+}
+#endif
+
 
 // RDDID(0x04)：ST7789 只做单向 SDA 时读回来是 0x00/0xFF，读不到不算错
 static uint32_t panel_read_id(void)
@@ -204,52 +298,31 @@ static void window_open(uint16_t px0, uint16_t py0, uint16_t px1, uint16_t py1)
 }
 
 // ---------------------------------------------------------------- 背光
+//
+// 先把背光直接拉亮，验证屏幕能显示内容；亮度调节以后再说。
+// 不再用 LEDC/PWM，不判断极性——上电就 digitalWrite HIGH。
 
 static void bl_hw_init(void)
 {
     if (s_bl_ready) return;
     pinMode(PIN_LCD_BL, OUTPUT);
-    // 先按"关"输出，别上电白闪
-#if LCD_BL_USE_PWM
-    ledcSetup(LCD_BL_LEDC_CH, LCD_BL_PWM_HZ, 10);
-    ledcWrite(LCD_BL_LEDC_CH, LCD_BL_ACTIVE_LOW ? 1023 : 0);
-    ledcAttachPin(PIN_LCD_BL, LCD_BL_LEDC_CH);
-#else
-    digitalWrite(PIN_LCD_BL, LCD_BL_ACTIVE_LOW ? HIGH : LOW);
-#endif
+    digitalWrite(PIN_LCD_BL, HIGH);   // 直接拉高点亮
     s_bl_ready = true;
 }
 
 void display_set_backlight(uint8_t percent)
 {
-    if (percent > 100) percent = 100;
+    (void)percent;
     bl_hw_init();
-    // 逻辑亮度 -> 占空比（低电平点亮时反过来）
-    uint32_t pct = LCD_BL_ACTIVE_LOW ? (100u - percent) : percent;
-#if LCD_BL_USE_PWM
-    ledcWrite(LCD_BL_LEDC_CH, pct * 1023u / 100u);
-#else
-    // 注意极性：active-low 时"亮"是 LOW，"灭"是 HIGH。
-    // 原来这里写 pct?HIGH:LOW，对低电平点亮的屏等于永远灭——背光不亮的元凶。
-    const bool on = (percent > 0);
-    digitalWrite(PIN_LCD_BL, LCD_BL_ACTIVE_LOW ? (on ? LOW : HIGH) : (on ? HIGH : LOW));
-#endif
+    digitalWrite(PIN_LCD_BL, HIGH);   // 先恒定点亮
 }
 
 // 背光通路自检：只动 BL 一脚，不依赖 SPI / PSRAM / LVGL。
 // 上电先跑这个 —— 眼睛看到闪 3 次就说明"背光这一半"没问题，剩下的黑屏一定是面板/LVGL。
 void display_backlight_probe(void)
 {
-    LCD_LOG("BL probe: pin=%d %s, %d ms x3\n",
-            PIN_LCD_BL, LCD_BL_ACTIVE_LOW ? "active-low" : "active-high", LCD_BL_PROBE_MS);
-    bl_hw_init();
-    for (int i = 0; i < 3; i++) {
-        display_set_backlight(100);
-        delay(LCD_BL_PROBE_MS);
-        display_set_backlight(0);
-        delay(LCD_BL_PROBE_MS);
-    }
-    LCD_LOG("BL probe done (看到闪 3 次 = 背光通路 OK)\n");
+    bl_hw_init();          // 直接拉高点亮，不再闪 3 次
+    LCD_LOG("BL on (pin=%d HIGH)\n", PIN_LCD_BL);
 }
 
 // ---------------------------------------------------------------- 对外
@@ -268,10 +341,35 @@ void display_init(void)
 
     // 注意 SPI.begin 的参数顺序是 (sck, miso, mosi, ss)
     s_spi.begin(PIN_LCD_SCK, PIN_LCD_MISO, PIN_LCD_MOSI, -1);
-    LCD_LOG("spi=FSPI(SPI2) sck=%d miso=%d mosi=%d cs=%d dc=%d rst=%d @ %u Hz\n",
+    LCD_LOG("spi=HSPI(SPI3) sck=%d miso=%d mosi=%d cs=%d dc=%d rst=%d @ %u Hz\n",
             PIN_LCD_SCK, PIN_LCD_MISO, PIN_LCD_MOSI, PIN_LCD_CS, PIN_LCD_DC, PIN_LCD_RST,
             (unsigned)LCD_BUS_HZ);
     LCD_LOG("panel %ux%u rot=%d madctl=0x%02X\n", s_w, s_h, s_rot, s_madctl);
+
+    // 硬件级诊断：SPI begin 之后，用 GPIO 直接翻转 CS/DC/RST/SCK/MOSI，
+    // 读回电平确认这些脚真的能被控制（排除 GPIO matrix 被 flash/PSRAM 劫持）。
+    {
+        pinMode(PIN_LCD_SCK, OUTPUT);
+        pinMode(PIN_LCD_MOSI, OUTPUT);
+        pinMode(PIN_LCD_CS, OUTPUT);
+        pinMode(PIN_LCD_DC, OUTPUT);
+        digitalWrite(PIN_LCD_SCK, HIGH);  digitalWrite(PIN_LCD_MOSI, HIGH);
+        digitalWrite(PIN_LCD_CS, HIGH);   digitalWrite(PIN_LCD_DC, HIGH);
+        delay(2);
+        int sck_h = digitalRead(PIN_LCD_SCK);
+        int mosi_h = digitalRead(PIN_LCD_MOSI);
+        int cs_h  = digitalRead(PIN_LCD_CS);
+        int dc_h  = digitalRead(PIN_LCD_DC);
+        digitalWrite(PIN_LCD_SCK, LOW);   digitalWrite(PIN_LCD_MOSI, LOW);
+        digitalWrite(PIN_LCD_CS, LOW);    digitalWrite(PIN_LCD_DC, LOW);
+        delay(2);
+        int sck_l = digitalRead(PIN_LCD_SCK);
+        int mosi_l = digitalRead(PIN_LCD_MOSI);
+        int cs_l  = digitalRead(PIN_LCD_CS);
+        int dc_l  = digitalRead(PIN_LCD_DC);
+        LCD_LOG("gpio 翻转测试: SCK %d/%d MOSI %d/%d CS %d/%d DC %d/%d (1=高 0=低，应都读到 1 和 0)\n",
+                sck_h, sck_l, mosi_h, mosi_l, cs_h, cs_l, dc_h, dc_l);
+    }
 
     // 硬复位：低 50ms -> 高 100ms（对齐厂商驱动；手册只要求低 >=10us）
     digitalWrite(PIN_LCD_RST, HIGH);
@@ -355,6 +453,23 @@ void display_push_area(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, const
     frame_end();
 }
 
+// 手册 p13：显存 320×240，128×160 只是其中一个窗口。
+// 这个函数把整块 320×240 显存都刷成 color，用来确认可见区在显存里的位置。
+void display_fill_panel(uint16_t color)
+{
+    if (!s_ready) return;
+    static uint8_t line[320 * 2];
+    for (uint16_t i = 0; i < 320; i++) {
+        line[i * 2]     = (uint8_t)(color >> 8);
+        line[i * 2 + 1] = (uint8_t)(color & 0xFF);
+    }
+    window_open(0, 0, 319, 239);
+    dc_data();
+    for (uint16_t y = 0; y < 240; y++) s_spi.writeBytes(line, sizeof line);
+    frame_end();
+    LCD_LOG("panel fill 320x240 color=0x%04X\n", color);
+}
+
 void display_fill(uint16_t color)
 {
     if (!s_ready) return;
@@ -407,6 +522,10 @@ void display_selftest(void)
     // 若屏幕显示红色  -> 反色/偏移都对，问题在 LVGL 刷屏那一段
     // 若显示青色0x07FF -> 反色反了（红被取反成青），把 LCD_INVERT 改回 0
     // 若还是白色      -> 像素根本没写进可见区，是偏移/窗口问题，与颜色无关
-    display_fill(0xF800);
+    display_fill_panel(0xF800);      // 整块 320×240 全红：只要玻璃在显存里，一定会看见红
+    delay(800);
+    display_fill_panel(0x001F);      // 全蓝，用来区分"没写进去"和"颜色翻了"
+    delay(800);
+    display_fill_panel(0xF800);
     LCD_LOG("selftest done -> RED (0xF800) 停住，观察屏幕颜色：红=正常/青=反色错/白=没写进去\n");
 }

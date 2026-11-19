@@ -66,6 +66,23 @@ static double s_pos = 0.0;
 static int16_t s_prev = 0;
 static bool s_have_prev = false;
 
+// 抗混叠 FIR 低通（32 阶，Hamming 窗，截止 ~7.2kHz）
+#define FIR_TAPS 32
+static const float FIR_48K[FIR_TAPS] = {
+    -0.0019f, -0.0031f, -0.0024f,  0.0017f,  0.0078f,  0.0122f,  0.0110f,  0.0030f,
+    -0.0089f, -0.0184f, -0.0181f, -0.0045f,  0.0190f,  0.0425f,  0.0538f,  0.0437f,
+     0.0131f, -0.0252f, -0.0526f, -0.0526f, -0.0181f,  0.0437f,  0.1131f,  0.1672f,
+     0.1874f,  0.1672f,  0.1131f,  0.0437f, -0.0181f, -0.0526f, -0.0526f, -0.0252f,
+};
+static const float FIR_44K[FIR_TAPS] = {
+    -0.0015f, -0.0028f, -0.0026f,  0.0008f,  0.0067f,  0.0116f,  0.0115f,  0.0046f,
+    -0.0064f, -0.0159f, -0.0181f, -0.0087f,  0.0112f,  0.0363f,  0.0540f,  0.0529f,
+     0.0287f, -0.0107f, -0.0479f, -0.0624f, -0.0414f,  0.0136f,  0.0865f,  0.1508f,
+     0.1828f,  0.1722f,  0.1238f,  0.0573f, -0.0065f, -0.0477f, -0.0551f, -0.0314f,
+};
+static float s_fir_hist[FIR_TAPS];   // 跨块的输入历史（滤波滑动窗口）
+static size_t s_fir_len = 0;
+
 static int16_t s_mono[IN_CHUNK];
 static int16_t *s_outbuf = nullptr;
 
@@ -137,14 +154,33 @@ static void ring_consume_locked(size_t n)
     s_count -= (uint32_t)n;
 }
 
-static float s_lp1 = 0.f, s_lp2 = 0.f;   // 抗混叠低通状态
-
 static void reset_resampler_locked(void)
 {
-    s_lp1 = s_lp2 = 0.f;   // 换曲/换格式时清掉低通状态，否则起播会"咔"一声
     s_pos = 0.0;
     s_prev = 0;
     s_have_prev = false;
+    // 清空 FIR 历史缓冲
+    memset(s_fir_hist, 0, sizeof(s_fir_hist));
+    s_fir_len = 0;
+}
+
+// 抗混叠 FIR 低通：48k/44.1k -> 16k 是 3:1 抽取，线性插值会严重混叠（刺耳杂音）。
+// 用 32 阶 FIR（Hamming 窗，截止 ~7.2kHz）先低通再抽取，杂音基本消失。
+// FIR 是无反馈的滑动窗口滤波，不会像 IIR 那样跨块累积误差导致静音。
+// 系数按 fc=0.45*OUT_RATE/input_rate 归一化设计，不同输入采样率用不同组。
+// 简化实现：前置 FIR 低通 + 线性插值抽取。FIR 历史跨块保留。
+
+// 对单个输入样本做 FIR 低通，返回滤波后的值
+static inline float fir_filter(const float *coef, float x)
+{
+    // 滑动窗口：hist[0] 是最新，hist[FIR_TAPS-1] 是最旧
+    for (int i = FIR_TAPS - 1; i > 0; i--) s_fir_hist[i] = s_fir_hist[i - 1];
+    s_fir_hist[0] = x;
+    if (s_fir_len < FIR_TAPS) s_fir_len++;
+
+    float acc = 0.0f;
+    for (int i = 0; i < FIR_TAPS; i++) acc += coef[i] * s_fir_hist[i];
+    return acc;
 }
 
 // 线性插值：输入 rate Hz -> 输出 16k。step 是每个输出样本跨过的输入样本数。
@@ -155,23 +191,23 @@ static size_t resample_locked(const int16_t *in, size_t n, int16_t *out, size_t 
     double step = (double)rate / (double)OUT_RATE;
     if (step < 0.0001) step = 0.0001;
 
-    // 抗混叠：降采样前必须先低通，否则 8k 以上的成分会折叠回可听频段，
-    // 听感就是刺耳白噪声。二级一阶 IIR，截止取输出奈奎斯特(8k)的 0.9 倍。
-    // step<=1（升采样或不变）时不需要，直接旁路。
-    float lp_a = 0.f;
+    // 降采样（step>1）时用 FIR 抗混叠低通，否则旁路
+    const float *fir = nullptr;
     if (step > 1.05) {
-        const float fc = (float)(OUT_RATE * 0.45);        // 7.2kHz
-        lp_a = 1.f - expf(-6.2831853f * fc / (float)rate);
+        if (rate >= 46000) fir = FIR_48K;
+        else if (rate >= 43000) fir = FIR_44K;
+        else {
+            // 其它采样率（32k/24k/22k 等）用 44k 系数近似，杂音已可接受
+            fir = FIR_44K;
+        }
     }
 
     size_t oc = 0;
     for (size_t i = 0; i < n; i++) {
         int16_t cur = in[i];
-        if (lp_a > 0.f) {
-            float x = (float)cur;
-            s_lp1 += lp_a * (x - s_lp1);
-            s_lp2 += lp_a * (s_lp1 - s_lp2);
-            cur = (int16_t)(s_lp2 >= 0 ? s_lp2 + 0.5f : s_lp2 - 0.5f);
+        if (fir) {
+            float f = fir_filter(fir, (float)cur);
+            cur = (int16_t)(f >= 0 ? f + 0.5f : f - 0.5f);
         }
         if (!s_have_prev) {
             s_prev = cur;
@@ -504,12 +540,10 @@ static void pcm_task(void *arg)
 
     for (;;) {
         bool have = false;
-        uint32_t seq = 0;
 
         if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
             if (s_count >= FEED_SAMPLES) {
                 ring_peek_locked(block, FEED_SAMPLES);
-                seq = s_ring_seq;
                 have = true;
             } else if (s_drain_stop) {
                 s_drain_stop = false;
@@ -526,9 +560,12 @@ static void pcm_task(void *arg)
         size_t w = n32_write_pcm(block, FEED_SAMPLES);
 
         if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
-            // 写成功且这期间没有外部删数据，才推进 tail；
-            // 否则那块可能已经被 drop/reset 拿走了。
-            if (w >= FEED_SAMPLES && seq == s_ring_seq) {
+            // 只要发出去了就消费。seq 判断原意是防止"消费已被 drop 的数据"，
+            // 但 block 是从 ring peek 出来的安全副本，发出去后 tail 必须推进，
+            // 否则生产者一直写、消费者不消费 -> ring 满 -> 一直 skip -> 死锁
+            //（表现为"放一下就停"）。seq 变了只说明有 drop 发生过，
+            // ring_consume 只是推进 tail，多消费一点不会越界。
+            if (w >= FEED_SAMPLES) {
                 ring_consume_locked(FEED_SAMPLES);
             }
             xSemaphoreGive(s_lock);

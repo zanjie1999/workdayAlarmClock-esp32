@@ -23,7 +23,7 @@ esptool.py --chip esp32s3 --port /dev/cu.usbmodemAlphaPi_ONE2 --baud 115200 \
                 --flash_size 8MB
 ```
 
-看到雪花屏就好连Wi-Fi配网了，搜索 `workdayAlarmClock`
+看到雪花屏就好连Wi-Fi进行第一次配网了，搜索 `workdayAlarmClock`，如果没网，20秒后会出现配网的Wi-Fi，可重新配网
 
 ## 从源码编译
 

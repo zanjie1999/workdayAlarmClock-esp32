@@ -13,14 +13,14 @@
 #include "eq.h"
 
 #include <Arduino.h>
-#include <Preferences.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "../app/app_config.h"  // EQ 持久化在 workdayAlarmClock.json 的 eq 字段（对齐 Go）
+
 namespace {
 
-const char *kNvs = "eq";
 const double kPi = 3.14159265358979323846;
 
 // 一段 biquad 的系数（已除以 a0）
@@ -206,24 +206,104 @@ void log_settings(const char *what)
                   (double)s_cur.vb_freq);
 }
 
-void nvs_save(void)
+// ---------------------------------------------------------------- json 读写（对齐 Go conf.EQSettings）
+
+// 取 "key": 后面跳过冒号和空格的位置；找不到返回 nullptr
+const char *jval(const char *js, const char *key)
 {
-    Preferences p;
-    if (!p.begin(kNvs, false)) return;
-    p.putBool("en", s_cur.enabled);
-    p.putFloat("pre", s_cur.preamp);
-    p.putFloat("vb", s_cur.virtual_bass);
-    p.putFloat("vbf", s_cur.vb_freq);
-    for (int i = 0; i < 3; i++) {
-        char kf[8], kg[8], kq[8];
-        snprintf(kf, sizeof kf, "b%df", i);
-        snprintf(kg, sizeof kg, "b%dg", i);
-        snprintf(kq, sizeof kq, "b%dq", i);
-        p.putFloat(kf, s_cur.bands[i].freq);
-        p.putFloat(kg, s_cur.bands[i].gain);
-        p.putFloat(kq, s_cur.bands[i].q);
+    char pat[40];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(js, pat);
+    if (!p) return nullptr;
+    p += strlen(pat);
+    const char *c = strchr(p, ':');
+    if (!c) return nullptr;
+    c++;
+    while (*c == ' ' || *c == '\t') c++;
+    return c;
+}
+
+// 解析 true/false 原文；不是布尔返回 false
+bool jbool(const char *v, bool *out)
+{
+    if (!v) return false;
+    if (!strncmp(v, "true", 4)) { *out = true; return true; }
+    if (!strncmp(v, "false", 5)) { *out = false; return true; }
+    return false;
+}
+
+// 解析数字（strtod）；解析不了返回默认值
+float jnum(const char *v, float def)
+{
+    if (!v) return def;
+    char *end = nullptr;
+    const double d = strtod(v, &end);
+    if (end == v) return def;
+    return (float)d;
+}
+
+// 在 [from, end) 窗口里找 "key" 的值（供逐 band 提取 freq/gain/q，避免串到下一段）
+const char *band_value(const char *from, const char *key, const char *end)
+{
+    char pat[16];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    for (const char *p = from; p && p < end; ) {
+        p = strstr(p, pat);
+        if (!p || p >= end) return nullptr;
+        const char *c = strchr(p + strlen(pat), ':');
+        if (!c || c >= end) return nullptr;
+        c++;
+        while (*c == ' ' || *c == '\t') c++;
+        return c;
     }
-    p.end();
+    return nullptr;
+}
+
+// 从 g_cfg.eq 的 json 原文解析设置；解析不了保持默认值
+void eq_load_from_cfg()
+{
+    set_defaults(&s_cur);
+    String js;
+    {
+        CfgLock lk;
+        js = g_cfg.eq;
+    }
+    if (!js.length()) return;
+
+    const char *d = js.c_str();
+    bool b = false;
+    const char *v = jval(d, "enabled");
+    if (v && jbool(v, &b)) s_cur.enabled = b;
+    s_cur.preamp = jnum(jval(d, "preamp"), s_cur.preamp);
+    s_cur.virtual_bass = jnum(jval(d, "virtualBass"), s_cur.virtual_bass);
+    s_cur.vb_freq = jnum(jval(d, "virtualBassFreq"), s_cur.vb_freq);
+
+    // bands：按 "type":"xxx" 切窗口，三个频段各取 freq/gain/q
+    static const char *const kNames[3] = {"lowshelf", "peaking", "highshelf"};
+    for (int i = 0; i < 3; i++) {
+        char pat[32];
+        snprintf(pat, sizeof pat, "\"type\":\"%s\"", kNames[i]);
+        const char *p = strstr(d, pat);
+        if (!p) continue;
+        const char *e = strstr(p + strlen(pat), "\"type\":");
+        if (!e) e = d + js.length();
+        s_cur.bands[i].freq = jnum(band_value(p, "freq", e), s_cur.bands[i].freq);
+        s_cur.bands[i].gain = jnum(band_value(p, "gain", e), s_cur.bands[i].gain);
+        s_cur.bands[i].q = jnum(band_value(p, "q", e), s_cur.bands[i].q);
+    }
+}
+
+// 把当前设置写回 g_cfg.eq（格式与 Go conf.EQSettings 一致）并落盘
+void eq_save_to_cfg()
+{
+    char buf[512];
+    const size_t n = eq_json(buf, sizeof buf);
+    if (!n) return;
+    {
+        CfgLock lk;
+        g_cfg.eq = String(buf, (unsigned)n);
+        cfg_save();
+    }
 }
 
 }  // namespace
@@ -234,29 +314,12 @@ bool eq_begin(void)
 {
     if (s_loaded) return true;
 
-    set_defaults(&s_cur);
-
-    bool found = false;
-    Preferences p;
-    if (p.begin(kNvs, true)) {
-        found = p.isKey("en");
-        s_cur.enabled = p.getBool("en", s_cur.enabled);
-        s_cur.preamp = p.getFloat("pre", s_cur.preamp);
-        s_cur.virtual_bass = p.getFloat("vb", s_cur.virtual_bass);
-        s_cur.vb_freq = p.getFloat("vbf", s_cur.vb_freq);
-        for (int i = 0; i < 3; i++) {
-            char kf[8], kg[8], kq[8];
-            snprintf(kf, sizeof kf, "b%df", i);
-            snprintf(kg, sizeof kg, "b%dg", i);
-            snprintf(kq, sizeof kq, "b%dq", i);
-            s_cur.bands[i].freq = p.getFloat(kf, s_cur.bands[i].freq);
-            s_cur.bands[i].gain = p.getFloat(kg, s_cur.bands[i].gain);
-            s_cur.bands[i].q = p.getFloat(kq, s_cur.bands[i].q);
-        }
-        p.end();
+    bool found;
+    {
+        CfgLock lk;
+        found = g_cfg.eq.length() > 0;
     }
-
-    normalize(&s_cur);
+    eq_load_from_cfg();
     memset(s_state, 0, sizeof s_state);
     snapshot_build(&s_cur);
     s_loaded = true;
@@ -273,6 +336,17 @@ void eq_set_rate(uint32_t rate)
     s_rate = r;
     if (!s_loaded) eq_begin();
     else snapshot_build(&s_cur);
+}
+
+// 配置文件被整体替换（/uploadCfg）后强制重读 g_cfg.eq
+void eq_reload(void)
+{
+    eq_load_from_cfg();
+    normalize(&s_cur);
+    memset(s_state, 0, sizeof s_state);
+    snapshot_build(&s_cur);
+    s_loaded = true;
+    log_settings("reload");
 }
 
 void eq_reset_state(void)
@@ -327,7 +401,7 @@ void eq_set(const eq_settings_t *s)
     s_cur = *s;
     normalize(&s_cur);
     snapshot_build(&s_cur);
-    nvs_save();
+    eq_save_to_cfg();
     log_settings("set");
 }
 
@@ -340,7 +414,7 @@ void eq_set_enabled(bool on)
     }
     s_cur.enabled = on;
     snapshot_build(&s_cur);
-    nvs_save();
+    eq_save_to_cfg();
     log_settings("set");
 }
 

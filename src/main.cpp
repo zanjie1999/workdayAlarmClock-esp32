@@ -122,8 +122,8 @@ void setup()
 
 void loop()
 {
+    // 只喂 LVGL：net_loop/alarm_tick 由 alarm_task 每秒调（alarm_begin 里启动）。
+    // 以前在这里调会把天气/工作日的阻塞 HTTP 拉到 LVGL 任务里，界面冻好几秒。
     lv_timer_handler();
-    net_loop();
-    alarm_tick();
     delay(5);
 }

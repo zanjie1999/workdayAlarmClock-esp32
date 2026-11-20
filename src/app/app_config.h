@@ -30,8 +30,21 @@ struct AppConfig {
     String musicApi;        // 目前只实现 netease
     String cookie;          // 网易云 cookie（可为空）
     String savePath;        // 缓存目录（对应 Go 的 savePath），空 = 完全不缓存；
-                            // 设置后歌单缓存 <savePath>/playlist.json、本地 mp3 筛选都指向它
+                            // 歌单缓存 <savePath>/<id>.list、歌曲缓存 <savePath>/<id>.mp3
     String smallWeekDate;   // 下一次小周日期 yyyymmdd
+    // ---- 以下字段对齐 Go conf.Config（含天气状态，供导出/导入互通）
+    String weatherCityCode; // 天气城市代码（9 位）
+    String weatherUpdate;   // 每天更新天气的 hhmm
+    String today;           // 今天日期描述（"11月19日(星期四)"，Go 的 sk.date）
+    int todayFc, todayFd;   // 今天最高/最低温度
+    String lastday;         // 昨天日期描述
+    int lastdayFc, lastdayFd;
+    bool wakelock;          // 仅存档（无唤醒锁硬件语义）
+    bool broadcastMode;     // 仅存档
+    String defSeek;         // 仅存档
+    int64_t cacheLimit;     // 音乐缓存上限（MB）
+    int port;               // 仅存档
+    String eq;              // 均衡器 json 原文（结构由 audio/eq.cpp 解析/生成，格式同 Go）
     String wifiSsid;
     String wifiPass;
     uint32_t lastEpoch;     // 上次已知时间，掉电后兜底用的"RTC"
@@ -69,3 +82,7 @@ void cfg_set_last_epoch(uint32_t epoch);
 
 // 播放格式化成一行：{"alarms":[{"time":"0730","types":["1","6"]}]}
 String cfg_alarm_json();
+
+// 兜底曲路径：配了缓存目录优先 <savePath>/music.mp3（Go 的 MusicUrl 缓存语义），
+// 否则用 LittleFS 根下的 /music.mp3
+String cfg_music_fallback_path();

@@ -3,14 +3,67 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <lvgl.h>
 
 #include "prov_portal.h"
+#include "../ui_port/ui/ui_font.h"
 #include "../web/api_alarm.h"
 #include "../web/web_media.h"
 #include "../web/web_ota.h"
 #include "../web/web_weather.h"
 #include "../web/web_extra.h"
 #include "../web/webui.h"
+
+// ---------------------------------------------------------------- 首配提示屏
+//
+// 修"第一次启动没配网时屏幕是雪花"：雪花 = 面板初始化后从未刷过一帧的 RAM
+// 内容。根因是 prov_ap_run 在 setup() 里无限等待，loop()/lv_timer_handler
+// 永远跑不到。这里在等待循环里自己喂 LVGL，并盖一个全屏提示卡。
+
+static lv_obj_t *s_prov_card = nullptr;
+
+static void prov_show_banner(void)
+{
+    lv_obj_t *scr = lv_screen_active();
+    if (!scr || s_prov_card) return;
+
+    s_prov_card = lv_obj_create(scr);
+    lv_obj_set_size(s_prov_card, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_prov_card, lv_color_hex(0x101418), 0);
+    lv_obj_set_style_bg_opa(s_prov_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_prov_card, 0, 0);
+    lv_obj_set_style_radius(s_prov_card, 0, 0);
+    lv_obj_set_style_pad_all(s_prov_card, 4, 0);
+    lv_obj_clear_flag(s_prov_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(s_prov_card);
+
+    lv_obj_t *label = lv_label_create(s_prov_card);
+    lv_label_set_text(label,
+                      "首次使用，请配网\n"
+                      "\n"
+                      "1. 手机连接热点\n"
+                      "workdayAlarmClock\n"
+                      "\n"
+                      "2. 浏览器打开\n"
+                      "http://192.168.4.1\n"
+                      "\n"
+                      "选择WiFi并保存");
+    lv_obj_set_style_text_color(label, lv_color_hex(0xe8ecf4), 0);
+    lv_obj_set_style_text_font(label, ui_font_cjk(14), 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(label, lv_obj_get_width(s_prov_card) - 8);
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+
+    lv_refr_now(NULL);  // 立刻刷一帧，不等别的定时器
+}
+
+static void prov_hide_banner(void)
+{
+    if (!s_prov_card) return;
+    lv_obj_delete(s_prov_card);
+    s_prov_card = nullptr;
+    lv_refr_now(NULL);
+}
 
 static httpd_handle_t s_srv = nullptr;
 
@@ -97,12 +150,17 @@ bool prov_ap_run(uint32_t timeout_ms)
         return false;
     }
 
+    // 首配提示屏 + 等待期间保持 LVGL 渲染（原版在这里干等，屏幕永远是雪花）
+    prov_show_banner();
+
     // 提交后 prov_portal 会自己 ESP.restart()，所以这里只是超时看门狗
     const uint32_t t0 = millis();
     while (timeout_ms == 0 || millis() - t0 < timeout_ms) {
-        delay(200);
+        delay(20);
+        lv_timer_handler();  // 配网页面照常工作，屏幕持续刷新
     }
 
+    prov_hide_banner();
     http80_stop();
     WiFi.mode(WIFI_OFF);
     Serial.println("[wifi ] 配网超时，继续启动（无网络）");

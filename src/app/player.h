@@ -8,6 +8,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <vector>
 
 // 歌单：字符串放 PSRAM，几百首也不吃内部 RAM（对应要求里"歌单列表 ps_malloc"）
 struct SongList {
@@ -43,6 +44,8 @@ void player_onkey();
 void player_play_url(const String &url);
 void player_play_playlist(const String &id, bool random);
 void player_play_music(const String &id);
+// 前端解析好的歌曲 id 列表（对应 Go 的 PlayNeMusicList，/playmusiclist POST 用）
+void player_play_music_list(const std::vector<String> &ids, const String &playlist_id, bool random);
 void player_play_alarm();
 
 // ---------------------------------------------------------------- 循环模式
@@ -64,6 +67,12 @@ bool player_is_alarm();
 String player_now_playing();
 int player_vol();
 uint32_t player_name_gen();        // 曲名代次：s.name 每次变化 +1（web 切歌接口等它）
+
+// 最近一次 next/prev/playlist 操作的语义文案（对齐 Go Next()/Prev()/PlayNePlaylist
+// 的返回值："上一首"/"随机播放列表"/"播放默认歌单<id>"/播放地址/歌单名/"停止播放"）。
+// 每次变化代次 +1，web 端等代次变化再回页面。
+String player_status_line();
+uint32_t player_status_gen();
 
 // ---------------------------------------------------------------- 只读状态（/status 用）
 // 对应 Go 版 player 包导出的字段，取不到的返回空串/0。

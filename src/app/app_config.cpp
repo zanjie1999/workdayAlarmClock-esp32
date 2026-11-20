@@ -39,6 +39,18 @@ AppConfig::AppConfig()
     musicQuality = "standard";
     musicApi = "netease";
     savePath = "";
+    weatherUpdate = "0700";
+    todayFc = todayFd = lastdayFc = lastdayFd = 0;
+    wakelock = false;
+    broadcastMode = false;
+    defSeek = "0";
+    cacheLimit = 1024;
+    port = 8080;
+    // 与 Go conf.DefaultEQ() 等价的 json（audio/eq.cpp 解析）
+    eq = "{\"enabled\":false,\"bands\":[{\"type\":\"lowshelf\",\"freq\":120,\"gain\":0,\"q\":0.707},"
+         "{\"type\":\"peaking\",\"freq\":1000,\"gain\":0,\"q\":1},"
+         "{\"type\":\"highshelf\",\"freq\":8000,\"gain\":0,\"q\":0.707}],"
+         "\"preamp\":0,\"virtualBass\":0,\"virtualBassFreq\":100}";
     lastEpoch = 0;
 }
 
@@ -252,6 +264,25 @@ static void member_str_array(const std::vector<Member> &ms, const char *key,
     }
 }
 
+// 整数成员（数字或带引号的数字都收）
+static bool member_int(const std::vector<Member> &ms, const char *key, long *out)
+{
+    String v;
+    if (!member_str(ms, key, &v)) return false;
+    *out = v.toInt();
+    return true;
+}
+
+// 布尔成员（json 的 true/false 原文）
+static bool member_bool(const std::vector<Member> &ms, const char *key, bool *out)
+{
+    String v;
+    if (!member_str(ms, key, &v)) return false;
+    v.toLowerCase();
+    *out = (v == "true" || v == "1");
+    return true;
+}
+
 // 闹钟表： "alarm":{"0700":["3","4"]}
 static void member_alarms(const std::vector<Member> &ms)
 {
@@ -346,19 +377,39 @@ static void load_json()
     if (member_str(ms, "cookie", &v)) g_cfg.cookie = v;
     if (member_str(ms, "savePath", &v)) g_cfg.savePath = v;
     if (member_str(ms, "smallWeekDate", &v)) g_cfg.smallWeekDate = v;
-    if (member_str(ms, "tz", &v)) g_cfg.tz = v.toInt();
+    if (member_str(ms, "weatherCityCode", &v)) g_cfg.weatherCityCode = v;
+    if (member_str(ms, "weatherUpdate", &v)) g_cfg.weatherUpdate = v;
+    if (member_str(ms, "today", &v)) g_cfg.today = v;
+    if (member_str(ms, "lastday", &v)) g_cfg.lastday = v;
+    if (member_str(ms, "defSeek", &v)) g_cfg.defSeek = v;
+    if (member_str(ms, "eq", &v)) g_cfg.eq = v;  // eq 对象原文，交给 audio/eq.cpp 解析
     if (member_str(ms, "alarmTime", &v)) g_cfg.alarmTime = v.toFloat();
-    if (member_str(ms, "muteWhenStop", &v)) g_cfg.muteWhenStop = (v == "true");
+    long li = 0;
+    if (member_int(ms, "tz", &li)) g_cfg.tz = (int)li;
+    if (member_int(ms, "todayFc", &li)) g_cfg.todayFc = (int)li;
+    if (member_int(ms, "todayFd", &li)) g_cfg.todayFd = (int)li;
+    if (member_int(ms, "lastdayFc", &li)) g_cfg.lastdayFc = (int)li;
+    if (member_int(ms, "lastdayFd", &li)) g_cfg.lastdayFd = (int)li;
+    if (member_int(ms, "cacheLimit", &li) && li > 0) g_cfg.cacheLimit = (int64_t)li;
+    if (member_int(ms, "port", &li)) g_cfg.port = (int)li;
+    member_bool(ms, "muteWhenStop", &g_cfg.muteWhenStop);
+    member_bool(ms, "wakelock", &g_cfg.wakelock);
+    member_bool(ms, "broadcastMode", &g_cfg.broadcastMode);
 
     member_alarms(ms);
     member_str_array(ms, "nePlayed", &g_cfg.nePlayed);
     while (g_cfg.nePlayed.size() > 50) g_cfg.nePlayed.erase(g_cfg.nePlayed.begin());
 
-    // 我们不负责的顶层成员原样留着
-    static const char *owned[] = {"volDefault",   "volAlarm",   "alarm",     "nePlayListId",
-                                  "defPlayListId", "nePlayed",  "tz",        "alarmTime",
-                                  "muteWhenStop", "musicQuality", "musicApi", "cookie",
-                                  "savePath",     "smallWeekDate"};
+    // 我们不负责的顶层成员原样留着（Go 新版本加的字段先原样透传）
+    static const char *owned[] = {
+        "volDefault",    "volAlarm",      "alarm",          "nePlayListId",
+        "defPlayListId", "nePlayed",      "tz",             "weatherCityCode",
+        "today",         "todayFc",       "todayFd",        "lastday",
+        "lastdayFc",     "lastdayFd",     "weatherUpdate",  "wakelock",
+        "alarmTime",     "muteWhenStop",  "musicQuality",   "musicApi",
+        "cookie",        "savePath",      "cacheLimit",     "broadcastMode",
+        "defSeek",       "smallWeekDate", "port",           "eq",
+    };
     s_extra = "";
     for (size_t i = 0; i < ms.size(); i++) {
         bool own = false;
@@ -386,7 +437,8 @@ void cfg_save()
     if (!fs_ready()) return;
 
     String j;
-    j.reserve(2048 + s_extra.length());
+    j.reserve(2048 + s_extra.length() + g_cfg.eq.length());
+    // 字段顺序与 Go conf.Config 结构体一致，两边互相读写同一份文件
     j += "{\"volDefault\":\"";
     j += json_esc(g_cfg.volDefault);
     j += "\",\"volAlarm\":\"";
@@ -418,8 +470,30 @@ void cfg_save()
     }
     j += "],\"tz\":";
     j += String(g_cfg.tz);
+    j += ",\"weatherCityCode\":\"";
+    j += json_esc(g_cfg.weatherCityCode);
+    j += "\",\"today\":\"";
+    j += json_esc(g_cfg.today);
+    j += "\",\"todayFc\":";
+    j += String(g_cfg.todayFc);
+    j += ",\"todayFd\":";
+    j += String(g_cfg.todayFd);
+    j += ",\"lastday\":\"";
+    j += json_esc(g_cfg.lastday);
+    j += "\",\"lastdayFc\":";
+    j += String(g_cfg.lastdayFc);
+    j += ",\"lastdayFd\":";
+    j += String(g_cfg.lastdayFd);
+    j += ",\"weatherUpdate\":\"";
+    j += json_esc(g_cfg.weatherUpdate);
+    j += "\",\"wakelock\":";
+    j += g_cfg.wakelock ? "true" : "false";
     j += ",\"alarmTime\":";
-    j += String(g_cfg.alarmTime, 2);
+    {
+        char num[24];
+        snprintf(num, sizeof num, "%g", (double)g_cfg.alarmTime);  // 与 Go 的 4.5 同形
+        j += num;
+    }
     j += ",\"muteWhenStop\":";
     j += g_cfg.muteWhenStop ? "true" : "false";
     j += ",\"musicQuality\":\"";
@@ -428,11 +502,31 @@ void cfg_save()
     j += json_esc(g_cfg.musicApi);
     j += "\",\"cookie\":\"";
     j += json_esc(g_cfg.cookie);
-    j += "\",\"smallWeekDate\":\"";
-    j += json_esc(g_cfg.smallWeekDate);
     j += "\",\"savePath\":\"";
     j += json_esc(g_cfg.savePath);
-    j += '"';
+    j += "\",\"cacheLimit\":";
+    {
+        char num[24];
+        snprintf(num, sizeof num, "%lld", (long long)g_cfg.cacheLimit);
+        j += num;
+    }
+    j += ",\"broadcastMode\":";
+    j += g_cfg.broadcastMode ? "true" : "false";
+    j += ",\"defSeek\":\"";
+    j += json_esc(g_cfg.defSeek);
+    j += "\",\"smallWeekDate\":\"";
+    j += json_esc(g_cfg.smallWeekDate);
+    j += "\",\"port\":";
+    j += String(g_cfg.port);
+    j += ",\"eq\":";
+    if (g_cfg.eq.length()) {
+        j += g_cfg.eq;  // 已是合法 json 对象原文
+    } else {
+        j += "{\"enabled\":false,\"bands\":[{\"type\":\"lowshelf\",\"freq\":120,\"gain\":0,\"q\":0.707},"
+             "{\"type\":\"peaking\",\"freq\":1000,\"gain\":0,\"q\":1},"
+             "{\"type\":\"highshelf\",\"freq\":8000,\"gain\":0,\"q\":0.707}],"
+             "\"preamp\":0,\"virtualBass\":0,\"virtualBassFreq\":100}";
+    }
     if (s_extra.length()) {
         j += ',';
         j += s_extra;
@@ -502,7 +596,7 @@ bool cfg_begin()
     }
 
     if (g_cfg.tz < -12 || g_cfg.tz > 14) g_cfg.tz = 8;
-    if (g_cfg.alarmTime <= 0 || g_cfg.alarmTime > 180) g_cfg.alarmTime = 4.5f;
+    if (g_cfg.cacheLimit <= 0) g_cfg.cacheLimit = 1024;  // 对齐 Go conf.Init
 
     ALOG("cfg", "闹钟 %u 条, 时区 UTC%+d, 音质 %s", (unsigned)g_cfg.alarms.size(), g_cfg.tz,
          g_cfg.musicQuality.c_str());
@@ -603,4 +697,21 @@ String cfg_alarm_json()
     }
     out += "]}";
     return out;
+}
+
+// ---------------------------------------------------------------- 兜底曲路径
+
+String cfg_music_fallback_path()
+{
+    String save;
+    {
+        CfgLock lk;
+        save = g_cfg.savePath;
+    }
+    while (save.length() > 1 && save.endsWith("/")) save.remove(save.length() - 1);
+    if (save.length() && save != "/" && save != ".") {
+        const String p = save + "/music.mp3";
+        if (LittleFS.exists(p)) return p;
+    }
+    return LittleFS.exists("/music.mp3") ? String("/music.mp3") : String();
 }

@@ -380,27 +380,60 @@ static esp_err_t h_play(httpd_req_t *req)
 // 当前队列里的兜底音乐文件（Go 版是工程根目录的 music.mp3）
 static esp_err_t h_music_mp3(httpd_req_t *req)
 {
-    static const char *const kPaths[] = {"/music.mp3", "/music/music.mp3"};
-    for (size_t i = 0; i < sizeof kPaths / sizeof kPaths[0]; i++) {
-        if (!LittleFS.exists(kPaths[i])) continue;
-        File f = LittleFS.open(kPaths[i], "r");
-        if (!f) continue;
-        httpd_resp_set_type(req, "audio/mpeg");
-        // esp_http_server 没有零拷贝文件流，按 1KB 推
-        char buf[1024];
-        int n;
-        while ((n = f.read((uint8_t *)buf, sizeof buf)) > 0) {
-            if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+    // 配了缓存目录优先 <savePath>/music.mp3（Go 的缓存语义），否则用根下的
+    const String path = cfg_music_fallback_path();
+    if (path.length()) {
+        File f = LittleFS.open(path, "r");
+        if (f) {
+            httpd_resp_set_type(req, "audio/mpeg");
+            // esp_http_server 没有零拷贝文件流，按 1KB 推
+            char buf[1024];
+            int n;
+            while ((n = f.read((uint8_t *)buf, sizeof buf)) > 0) {
+                if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+            }
+            f.close();
+            httpd_resp_send_chunk(req, nullptr, 0);  // 结束 chunked
+            log_req("GET", req->uri, 200);
+            return ESP_OK;
         }
-        f.close();
-        httpd_resp_send_chunk(req, nullptr, 0);  // 结束 chunked
-        log_req("GET", req->uri, 200);
-        return ESP_OK;
     }
     httpd_resp_set_status(req, "404 Not Found");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     log_req("GET", req->uri, 404);
     return httpd_resp_send(req, "music.mp3 not found", HTTPD_RESP_USE_STRLEN);
+}
+
+// TTS 天气音频（Go 版 /weather.mp3）：/downWeather 下载到 <savePath>/weather.mp3
+static esp_err_t h_weather_mp3(httpd_req_t *req)
+{
+    String save;
+    {
+        CfgLock lk;
+        save = g_cfg.savePath;
+    }
+    while (save.length() > 1 && save.endsWith("/")) save.remove(save.length() - 1);
+    const String path =
+        (save.length() && save != "/" && save != ".") ? save + "/weather.mp3" : String();
+    if (path.length() && LittleFS.exists(path)) {
+        File f = LittleFS.open(path, "r");
+        if (f) {
+            httpd_resp_set_type(req, "audio/mpeg");
+            char buf[1024];
+            int n;
+            while ((n = f.read((uint8_t *)buf, sizeof buf)) > 0) {
+                if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+            }
+            f.close();
+            httpd_resp_send_chunk(req, nullptr, 0);
+            log_req("GET", req->uri, 200);
+            return ESP_OK;
+        }
+    }
+    httpd_resp_set_status(req, "404 Not Found");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    log_req("GET", req->uri, 404);
+    return httpd_resp_send(req, "weather.mp3 not found", HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t h_dispatch(httpd_req_t *req)
@@ -427,6 +460,7 @@ static esp_err_t h_dispatch(httpd_req_t *req)
     if (!strcmp(uri, "/")) return h_root(req);
     if (!strcmp(uri, "/status")) return h_status(req);
     if (!strcmp(uri, "/music.mp3")) return h_music_mp3(req);
+    if (!strcmp(uri, "/weather.mp3")) return h_weather_mp3(req);
     if (!strcmp(uri, "/play")) return h_play(req);
 
     if (!strcmp(uri, "/hello")) {
@@ -454,14 +488,14 @@ static esp_err_t h_dispatch(httpd_req_t *req)
             app_cmd_feed(kCmds[i].cmd);
             if (!strcmp(uri, "/stop")) return send_html_raw(req, String("<h1>stop</h1>") + JS2HOME);
             if (!strcmp(uri, "/next") || !strcmp(uri, "/prev")) {
-                // 切歌是异步的（player 任务要拿播放地址+曲名，走两次网络），
-                // 对齐 Go 的同步语义：等曲名代次变化再回页面，最多 4 秒，
-                // 超时就回当前值（单曲循环重播时曲名不变，靠超时兜底）。
-                const uint32_t gen0 = player_name_gen();
+                // 切歌是异步的（player 任务要拿播放地址+曲名，走两次网络）。
+                // 对齐 Go 的同步语义：Next()/Prev() 返回语义文案（"上一首"/
+                // "随机播放列表"/播放地址/"停止播放"），等代次变化再回页面，最多 4 秒。
+                const uint32_t gen0 = player_status_gen();
                 const uint32_t t0   = millis();
-                while (millis() - t0 < 4000 && player_name_gen() == gen0)
+                while (millis() - t0 < 4000 && player_status_gen() == gen0)
                     vTaskDelay(pdMS_TO_TICKS(50));
-                return send_html_raw(req, String("<h2>") + player_now_playing() + "</h2>" + JS2HOME);
+                return send_html_raw(req, String("<h2>") + player_status_line() + "</h2>" + JS2HOME);
             }
             if (!strcmp(uri, "/1key")) return send_html_raw(req, String("<h1>ok</h1>") + JS2HOME);
             // pause / resume / volp / volm -> 只回 js2back
@@ -520,7 +554,13 @@ static esp_err_t h_dispatch(httpd_req_t *req)
             char line[48];
             snprintf(line, sizeof line, "stop %ld", (left + 59) / 60);
             app_cmd_feed(line);
-            return send_html_raw(req, String("<h2>定时停止已设置</h2>") + JS2HOME);
+            // 对齐 Go 的返回文案："将在 YYYY-MM-DD HH:MM:SS 后停止"
+            time_t target = (time_t)u;
+            struct tm lt;
+            localtime_r(&target, &lt);
+            char when[32];
+            strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", &lt);
+            return send_html_raw(req, String("<h2>将在 ") + when + " 后停止</h2>" + JS2HOME);
         }
         if (query_get(req, "min", min, sizeof min) && min[0]) {
             char *end = nullptr;
@@ -530,7 +570,12 @@ static esp_err_t h_dispatch(httpd_req_t *req)
             char line[48];
             snprintf(line, sizeof line, "stop %s", min);  // app_cmd 里按 toFloat 解析
             app_cmd_feed(line);
-            return send_html_raw(req, String("<h2>定时停止已设置</h2>") + JS2HOME);
+            time_t target = time(nullptr) + (time_t)(v * 60.0f);
+            struct tm lt;
+            localtime_r(&target, &lt);
+            char when[32];
+            strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", &lt);
+            return send_html_raw(req, String("<h2>将在 ") + when + " 后停止</h2>" + JS2HOME);
         }
         app_cmd_feed("stop 0");
         return send_html_raw(req, String("<h2>定时停止已取消</h2>") + JS2HOME);

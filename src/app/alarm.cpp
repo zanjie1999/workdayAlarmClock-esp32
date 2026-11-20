@@ -250,14 +250,22 @@ void alarm_tick()
     if (s_wd_err || hhmm == "0000") workday_refresh();
 
     // 天气（对齐 Go 定时器）：开机时间同步成功后先拉一次，之后每小时整点拉一次；
-    // weather_refresh 内部有"本小时已拉过"节流，成功后给 LVGL 发 WEATHER/WEATHERAL
+    // 另外每天 weatherUpdate（hhmm）时刻拉一次。weather_refresh 内部有
+    // "本小时已拉过"节流，成功后给 LVGL 发 WEATHER/WEATHERAL
     {
         static bool s_wx_boot = false;
         if (!s_wx_boot) {
             s_wx_boot = true;
             weather_refresh();
         } else if (hhmm.length() == 4 && hhmm.endsWith("00")) {
-            weather_refresh();
+            weather_refresh();  // LVGL 模式的整点拉取
+        } else {
+            String wu;
+            {
+                CfgLock lk;
+                wu = g_cfg.weatherUpdate;
+            }
+            if (wu.length() && hhmm == wu) weather_refresh();  // 每日固定更新时间
         }
     }
 
@@ -428,6 +436,13 @@ bool alarm_del_types(const String &hhmm_in, const String &types_in, String *msg)
 }
 
 String alarm_list_json() { return cfg_alarm_json(); }
+
+void alarm_workday_refresh()
+{
+    s_wd_err = true;  // 置错让 alarm_tick 的换日判定失效，下一次 tick 立刻重查
+    s_wd_date = "";
+    workday_refresh();
+}
 
 // ---------------------------------------------------------------- 任务
 

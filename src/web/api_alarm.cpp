@@ -230,15 +230,6 @@ String parse_id(const String &raw)
     return s;
 }
 
-String first_token(const String &s, char sep)
-{
-    int b = 0;
-    while (b < (int)s.length() && (s[b] == sep || s[b] == ' ')) b++;
-    int e = b;
-    while (e < (int)s.length() && s[e] != sep && s[e] != ' ') e++;
-    return s.substring(b, e);
-}
-
 // ================================================================ 闹钟
 
 esp_err_t h_add_alarm(httpd_req_t *req)
@@ -354,8 +345,13 @@ esp_err_t h_playlist(httpd_req_t *req)
     bool random = qget(req, "random") == "1";
     player_play_playlist(id, random);
     rlog("/playlist %s random=%d -> ok", id.c_str(), (int)random);
+    // 对齐 Go 的同步语义：PlayNePlaylist 返回歌单名，等播放器把它记下来再回页面
+    const uint32_t gen0 = player_status_gen();
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 4000 && player_status_gen() == gen0)
+        vTaskDelay(pdMS_TO_TICKS(50));
     String body = "<h1>播放歌单 ";
-    body += id;
+    body += player_status_line();
     body += "</h1>";
     body += JS2HOME;
     return send_html(req, body);
@@ -376,15 +372,43 @@ esp_err_t h_playmusic(httpd_req_t *req)
     return send_html(req, body);
 }
 
-// 固件没有"ids 队列"接口，按 Go 语义从第一首开始播（player 自己会接着下一首）
+// POST /playmusiclist?random=1  body: {"ids":["..."],"id":"..."}
+// （Go 端已同步改成 POST，原 GET 的 ids 查询串太长会被 URL 上限截断）
 esp_err_t h_playmusiclist(httpd_req_t *req)
 {
-    String ids = qget(req, "ids");
-    if (!ids.length()) return send_html(req, String("<h1>ids is empty</h1>") + JS2HOME);
-    String first = parse_id(first_token(ids, ','));
-    if (!first.length()) return send_html(req, String("<h1>ids is empty</h1>") + JS2HOME);
-    player_play_music(first);
-    rlog("/playmusiclist first=%s -> ok", first.c_str());
+    String body;
+    if (!recv_body(req, &body, 16 * 1024)) return send_html(req, "ids is empty");
+
+    // "ids":[...] 逐个抽字符串
+    std::vector<String> ids;
+    const char *js = body.c_str();
+    const char *p = strstr(js, "\"ids\"");
+    if (p) {
+        const char *q = strchr(p, '[');
+        const char *e = q ? strchr(q, ']') : nullptr;
+        const char *cur = q ? q + 1 : js + body.length();
+        while (e && cur < e) {
+            while (cur < e && *cur != '"' && *cur != '\'') cur++;
+            if (cur >= e) break;
+            char close = *cur++;
+            const char *ve = strchr(cur, close);
+            if (!ve || ve > e) break;
+            if (ve > cur) {
+                String one = json_unescape(cur, (int)(ve - cur));
+                one = appstr::trim(one);
+                if (one.length()) ids.push_back(one);
+            }
+            cur = ve + 1;
+        }
+    }
+    String pid;
+    json_get_str_from(js, "id", &pid);
+    pid = parse_id(pid);
+    if (!ids.size()) return send_html(req, "ids is empty");
+
+    bool random = qget(req, "random") == "1";
+    player_play_music_list(ids, pid, random);
+    rlog("/playmusiclist n=%u pid=%s -> ok", (unsigned)ids.size(), pid.c_str());
     return send_html(req, "ok");
 }
 
@@ -430,11 +454,25 @@ String cfg_json()
     j += "],\"tz\":";
     j += String(g_cfg.tz);
 
-    // 天气、唤醒锁、缓存目录这些 ESP32 侧没有实现，按 Go 默认值占位，
-    // 保证 alarm.html 取到的键都在（少一个键 input.value 会变成 undefined）
-    j += ",\"weatherCityCode\":\"\",\"today\":\"\",\"todayFc\":0,\"todayFd\":0"
-         ",\"lastday\":\"\",\"lastdayFc\":0,\"lastdayFd\":0,\"weatherUpdate\":\"0700\""
-         ",\"wakelock\":false";
+    // 天气状态字段（对齐 Go conf.Config，真实值）
+    j += ",\"weatherCityCode\":\"";
+    j += jesc(g_cfg.weatherCityCode);
+    j += "\",\"today\":\"";
+    j += jesc(g_cfg.today);
+    j += "\",\"todayFc\":";
+    j += String(g_cfg.todayFc);
+    j += ",\"todayFd\":";
+    j += String(g_cfg.todayFd);
+    j += ",\"lastday\":\"";
+    j += jesc(g_cfg.lastday);
+    j += "\",\"lastdayFc\":";
+    j += String(g_cfg.lastdayFc);
+    j += ",\"lastdayFd\":";
+    j += String(g_cfg.lastdayFd);
+    j += ",\"weatherUpdate\":\"";
+    j += jesc(g_cfg.weatherUpdate);
+    j += "\",\"wakelock\":";
+    j += g_cfg.wakelock ? "true" : "false";
 
     snprintf(num, sizeof num, "%g", (double)g_cfg.alarmTime);
     j += ",\"alarmTime\":";
@@ -448,11 +486,24 @@ String cfg_json()
     // Go 版回显时把 cookie 清掉，防止局域网里直接看到登录态
     j += "\",\"cookie\":\"\",\"savePath\":\"";
     j += jesc(g_cfg.savePath);
-    j += "\",\"cacheLimit\":1024"
-         ",\"broadcastMode\":false,\"defSeek\":\"0\",\"smallWeekDate\":\"";
-    j += jesc(g_cfg.smallWeekDate);
-    j += "\",\"port\":80,\"eq\":";
+    j += "\",\"cacheLimit\":";
     {
+        char num[24];
+        snprintf(num, sizeof num, "%lld", (long long)g_cfg.cacheLimit);
+        j += num;
+    }
+    j += ",\"broadcastMode\":";
+    j += g_cfg.broadcastMode ? "true" : "false";
+    j += ",\"defSeek\":\"";
+    j += jesc(g_cfg.defSeek);
+    j += "\",\"smallWeekDate\":\"";
+    j += jesc(g_cfg.smallWeekDate);
+    j += "\",\"port\":";
+    j += String(g_cfg.port);
+    j += ",\"eq\":";
+    if (g_cfg.eq.length()) {
+        j += g_cfg.eq;  // 配置里存的 eq 对象原文，格式与 Go conf.EQSettings 一致
+    } else {
         char eqb[384];
         eq_json(eqb, sizeof eqb);
         j += eqb;
@@ -470,18 +521,18 @@ esp_err_t h_cfg_json(httpd_req_t *req)
 
 esp_err_t h_update_cfg(httpd_req_t *req)
 {
-    bool changed = false;
     bool tz_changed = false;
+    bool sw_changed = false;
     String err;
 
     {
         CfgLock lk;
         String v;
 
-        if (qhas(req, "volDefault", &v) && v.length()) { g_cfg.volDefault = v; changed = true; }
-        if (qhas(req, "volAlarm", &v) && v.length()) { g_cfg.volAlarm = v; changed = true; }
-        if (qhas(req, "nePlayListId", &v) && v.length()) { g_cfg.nePlayListId = v; changed = true; }
-        if (qhas(req, "defPlayListId", &v) && v.length()) { g_cfg.defPlayListId = v; changed = true; }
+        if (qhas(req, "volDefault", &v) && v.length()) g_cfg.volDefault = v;
+        if (qhas(req, "volAlarm", &v) && v.length()) g_cfg.volAlarm = v;
+        if (qhas(req, "nePlayListId", &v) && v.length()) g_cfg.nePlayListId = v;
+        if (qhas(req, "defPlayListId", &v) && v.length()) g_cfg.defPlayListId = v;
 
         if (qhas(req, "tz", &v) && v.length()) {
             if (!appstr::all_digits(v) && !(v[0] == '-' && appstr::all_digits(v.substring(1)))) {
@@ -494,27 +545,16 @@ esp_err_t h_update_cfg(httpd_req_t *req)
                 }
                 else if (tz != g_cfg.tz) {
                     g_cfg.tz = tz;
-                    changed = true;
                     tz_changed = true;
                 }
             }
         }
         if (qhas(req, "alarmTime", &v) && v.length()) {
-            float m = v.toFloat();
-            if (m > 0 && m <= 180) {
-                g_cfg.alarmTime = m;
-                changed = true;
-            }
+            g_cfg.alarmTime = v.toFloat();  // Go 同款不校验范围
         }
         // 复选框没勾时浏览器根本不发这个参数，和 Go 一样按 false 处理
-        {
-            bool mute = qget(req, "muteWhenStop") == "1";
-            if (g_cfg.muteWhenStop != mute) {
-                g_cfg.muteWhenStop = mute;
-                changed = true;
-            }
-        }
-        if (qhas(req, "musicQuality", &v) && v.length()) { g_cfg.musicQuality = v; changed = true; }
+        g_cfg.muteWhenStop = qget(req, "muteWhenStop") == "1";
+        if (qhas(req, "musicQuality", &v)) g_cfg.musicQuality = v;
         if (qhas(req, "musicApi", &v) && v.length()) {
             if (v == "netease" || v == "qq" || v == "kugou") {
                 if (g_cfg.musicApi != v) {
@@ -522,15 +562,29 @@ esp_err_t h_update_cfg(httpd_req_t *req)
                     // 换源后另一个平台的播放记录没意义，清掉（和 Go 一致）
                     g_cfg.nePlayed.clear();
                 }
-                changed = true;
             }
         }
         if (qhas(req, "smallWeekDate", &v) && g_cfg.smallWeekDate != v) {
             g_cfg.smallWeekDate = v;
-            changed = true;
+            sw_changed = true;  // 对齐 Go：变了立刻 WorkDayApi
+        }
+        // 天气两参数：Go 是无条件赋值（表单总是全量提交，传空即清空）
+        g_cfg.weatherCityCode = qget(req, "weatherCityCode");
+        g_cfg.weatherUpdate = qget(req, "weatherUpdate");
+        // 缓存上限（MB），只收正整数（文案对齐 Go）
+        if (qhas(req, "cacheLimit", &v) && v.length()) {
+            char *end = nullptr;
+            const unsigned long long cl = strtoull(v.c_str(), &end, 10);
+            if (!appstr::all_digits(v) || end == v.c_str() || (end && *end) || cl == 0 ||
+                cl > 0x00ffffffffffffffULL) {
+                err = "缓存上限必须是正整数";
+            }
+            else {
+                g_cfg.cacheLimit = (int64_t)cl;
+            }
         }
         // 缓存目录（对齐 Go router.go 的 savePath）：
-        //   空串 = 关闭缓存（歌单缓存 / 本地 mp3 筛选全部不生效）
+        //   空串 = 关闭缓存（歌单缓存 / 歌曲下载缓存全部不生效）
         //   "/"  或 "./" -> 规范成 "/music"
         //   其余规范化成绝对路径（去尾部斜杠），不存在就建一层
         if (qhas(req, "savePath", &v)) {
@@ -540,21 +594,17 @@ esp_err_t h_update_cfg(httpd_req_t *req)
             if (!v.isEmpty() && !v.startsWith("/")) v = "/" + v;
             if (g_cfg.savePath != v) {
                 g_cfg.savePath = v;
-                changed = true;
                 if (!v.isEmpty()) {
                     if (!LittleFS.exists(v) && !LittleFS.mkdir(v))
                         ALOG("cfg", "缓存目录创建失败 %s", v.c_str());
                 }
             }
         }
-        // 其余参数（weatherCityCode / wakelock / cacheLimit /
-        // broadcastMode / defSeek / weatherUpdate）ESP32 侧没有实现，忽略；
-        // 它们由 app_config.cpp 的 s_extra 原样保留在 json 里，不会丢。
     }
 
     if (err.length()) return send_h1_back(req, err);
 
-    if (changed) cfg_save();
+    cfg_save();  // 对齐 Go：updateCfg 最后总是落盘
     if (tz_changed) {
         int tz;
         {
@@ -563,7 +613,8 @@ esp_err_t h_update_cfg(httpd_req_t *req)
         }
         time_apply_tz(tz);  // 时区改了，时间函数要跟着换
     }
-    rlog("/updateCfg -> %s", changed ? "ok" : "nochange");
+    if (sw_changed) alarm_workday_refresh();
+    rlog("/updateCfg -> ok");
     return send_html(req, JS2BACK);
 }
 
@@ -603,6 +654,8 @@ esp_err_t h_upload_cfg(httpd_req_t *req)
         tz = g_cfg.tz;
     }
     time_apply_tz(tz);
+    eq_reload();  // 新文件里的 eq 字段立即生效（EQ 存储已迁到 json）
+    alarm_workday_refresh();  // 对齐 Go：/uploadCfg 后立刻 WorkDayApi
 
     rlog("/uploadCfg %u B -> ok", (unsigned)js.length());
     return send_html(req, String("<h1>上传成功</h1>") + JS2HOME);
@@ -632,13 +685,44 @@ esp_err_t h_set_cookie(httpd_req_t *req)
     return send_json(req, j);
 }
 
+// 递归删掉 dir 下所有内容，保留 dir 本身（对齐 Go RemoveAll + MkdirAll）
+static bool fs_remove_all(const String &dir)
+{
+    File d = LittleFS.open(dir, "r");
+    if (!d || !d.isDirectory()) return false;
+    bool ok = true;
+    for (;;) {
+        File e = d.openNextFile();
+        if (!e) break;
+        String full = e.path();
+        const bool is_dir = e.isDirectory();
+        e.close();
+        if (!full.length()) continue;
+        if (is_dir) {
+            fs_remove_all(full);
+            ok = LittleFS.rmdir(full) && ok;
+        } else {
+            ok = LittleFS.remove(full) && ok;
+        }
+    }
+    d.close();
+    return ok;
+}
+
+// 对齐 Go：配了缓存目录就清空里面的缓存文件；没配（或根目录）驳回
 esp_err_t h_del_save(httpd_req_t *req)
 {
+    String save;
     {
         CfgLock lk;
-        g_cfg.nePlayed.clear();
+        save = g_cfg.savePath;
     }
-    cfg_save();
+    while (save.length() > 1 && save.endsWith("/")) save.remove(save.length() - 1);
+    if (!save.length() || save == "/" || save == ".") {
+        return send_html(req,
+                         String("<h1>你的操作很危险，驳回</h1><br>") + save + JS2HOME);
+    }
+    fs_remove_all(save);
     rlog("/delSave -> ok");
     return send_html(req, String("<h1>已删除</h1>") + JS2HOME);
 }
@@ -783,7 +867,7 @@ esp_err_t api_alarm_register(httpd_handle_t srv)
         {HTTP_GET, "/skipAlarm", h_skip_alarm},
         {HTTP_GET, "/playlist", h_playlist},
         {HTTP_GET, "/playmusic", h_playmusic},
-        {HTTP_GET, "/playmusiclist", h_playmusiclist},
+        {HTTP_POST, "/playmusiclist", h_playmusiclist},  // Go 端同步改成了 POST
         {HTTP_GET, "/cfg.json", h_cfg_json},
         {HTTP_GET, "/updateCfg", h_update_cfg},
         {HTTP_POST, "/uploadCfg", h_upload_cfg},

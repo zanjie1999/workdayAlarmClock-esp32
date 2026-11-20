@@ -380,6 +380,11 @@ static esp_err_t h_scan(httpd_req_t *req)
         vTaskDelay(pdMS_TO_TICKS(120));
     }
 
+    // ★修"配网页扫不出 WiFi"：AP_STA 下 STA 的连接尝试会和扫描抢射频，
+    // 90% 的尝试直接失败。把 STA 完全停住（net_loop 也不再重试），
+    // 扫完放行，net_loop 自己会重新 begin。
+    net_pause_sta(true);
+
     // 异步扫 + 自己轮询。刚切到 AP_STA 时驱动常常还没就绪，
     // 第一枪成功率为 0（返回 -1），所以最多重试 3 次。
     int16_t found = WIFI_SCAN_FAILED;
@@ -402,6 +407,7 @@ static esp_err_t h_scan(httpd_req_t *req)
     if (found < 0) {
         PLOG("scan -> 0 nets (err %d)\n", (int)found);
         WiFi.scanDelete();
+        net_pause_sta(false);
         return send_json(req, "[]", 2);
     }
 
@@ -452,6 +458,7 @@ static esp_err_t h_scan(httpd_req_t *req)
     js[n] = 0;
 
     WiFi.scanDelete();  // 扫描结果占内存，用完立刻放掉
+    net_pause_sta(false);  // 放行 net_loop，STA 重新开始重试
     esp_err_t e = send_json(req, js, n);
     PLOG("scan -> %d nets\n", sent);
     return e;

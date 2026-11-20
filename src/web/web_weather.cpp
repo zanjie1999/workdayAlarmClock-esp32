@@ -4,9 +4,11 @@
 // （要浏览器 UA + Referer，所以像 getWeatherCityCode 一样走 WiFiClient 裸 HTTP，
 //   app_net 写死的请求头会 403）。拉取失败时退回 itboy 接口（同样 9 位城市码）。
 //
-// 缓存策略：城市代码 + 上次成功的结果写 NVS（命名空间 "weather"），同时留一份
-// 在 RAM。同一小时内直接回缓存，换小时/换城市才重拉（对齐 Go 的整点拉取）。
-// lastday 语义照 Go：换天后才把昨天的高/低温固化下来做冷暖对比。
+// 状态存储（对齐 Go conf.Config，全在 workdayAlarmClock.json）：
+//   weatherCityCode  城市代码        today      今天日期描述（Go sk.date）
+//   todayFc/todayFd  今天高/低温     lastday*   昨天高/低温（换天才固化）
+//   weatherUpdate    每天更新时间    weather.mp3  TTS 音频（配了缓存目录才有）
+// RAM 里只留 s_body/s_msg/s_hour 这类"本小时节流"用的临时缓存，重启即失。
 //
 // 每次成功拉取都通过 app_bus_event 给 LVGL 发：
 //   WEATHER <实况天气><实况温度>℃   → 时钟页顶部状态行
@@ -14,7 +16,7 @@
 #include "web_weather.h"
 
 #include <Arduino.h>
-#include <Preferences.h>
+#include <LittleFS.h>
 #include <WiFi.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +24,7 @@
 
 #include "../app_bus.h"
 #include "../app/app_common.h"
+#include "../app/app_config.h"
 #include "../app/app_net.h"
 
 namespace {
@@ -32,68 +35,45 @@ namespace {
 const char *kApiPrefix = "http://t.weather.itboy.net/api/weather/city/";
 const char *kSearchHost = "toy1.weather.com.cn";
 const char *kSearchRef = "http://www.weather.com.cn/";  // 不带 Referer 搜索接口只回 "()"
-const char *kNvs = "weather";  // 单独一块命名空间，别去动 app_config 的 "wac"
+// Go player.DownWeather 同款 TTS 地址
+const char *kTtsUrl =
+    "https://dds.dui.ai/runtime/v1/synthesize?voiceId=cyangfp&speed=1&volume=100&audioType=mp3&text=";
 const char *kJsonType = "application/json; charset=utf-8";
 
 // ---------------------------------------------------------------- 缓存
 
-// 缓存体是"内层字段"，形如 "code":"101280102","cityname":"番禺区",...
-// 渲染时再包上 {"ok":...,"stale":...,"ts":...}，这样 stale 不用回写 NVS。
-String s_code;
-String s_body;
-String s_date;  // s_body 的拉取日期 yyyymmdd，"换小时就重拉"用
-String s_skdate;  // d1 dataSK.date（"11月19日(星期四)"），换天判定用（Go conf.Cfg.Today）
-int s_tfc = 0, s_tfd = 0;  // 今天高/低温（Go conf.Cfg.TodayFc/Fd）
-int s_lfc = 0, s_lfd = 0;  // 昨天高/低温（Go conf.Cfg.LastdayFc/Fd）
+// RAM 临时缓存：仅供"本小时已拉过"节流和播报取词，权威状态在 g_cfg（json）
+//   g_cfg.today/lastday     日期描述（Go 的 sk.date，换天判定）
+//   g_cfg.todayFc/Fd        今天高/低温
+//   g_cfg.lastdayFc/Fd      昨天高/低温（换天才固化，对齐 Go）
+String s_msg;       // 最近一次成功拉取的播报文案（闹钟结束在线播报用）
+String s_date;      // 最近拉取日期 yyyymmdd（换天/节流判定用）
 uint32_t s_ts = 0;
-int s_hour = -1;  // 本小时内已拉过就不再拉（RAM，不落 NVS）
-bool s_loaded = false;
+int s_hour = -1;    // 本小时内已拉过就不再拉（RAM，重启归零）
 
-void cache_load()
+// 天气状态字段变化后统一落盘
+void cfg_flush_weather()
 {
-    if (s_loaded) return;
-    Preferences p;
-    if (p.begin(kNvs, true)) {
-        s_code   = p.getString("code", "");
-        s_body   = p.getString("body", "");
-        s_date   = p.getString("date", "");
-        s_skdate = p.getString("skdate", "");
-        s_tfc    = p.getInt("tfc", 0);
-        s_tfd    = p.getInt("tfd", 0);
-        s_lfc    = p.getInt("lfc", 0);
-        s_lfd    = p.getInt("lfd", 0);
-        s_ts     = p.getUInt("ts", 0);
-        p.end();
-    }
-    s_loaded = true;
-}
-
-void cache_save()
-{
-    Preferences p;
-    if (!p.begin(kNvs, false)) return;
-    p.putString("code", s_code);
-    p.putString("body", s_body);
-    p.putString("date", s_date);
-    p.putString("skdate", s_skdate);
-    p.putInt("tfc", s_tfc);
-    p.putInt("tfd", s_tfd);
-    p.putInt("lfc", s_lfc);
-    p.putInt("lfd", s_lfd);
-    p.putUInt("ts", s_ts);
-    p.end();
+    cfg_touch();
+    cfg_save();
 }
 
 void set_code(const String &code)
 {
-    if (s_code == code) return;
-    s_code = code;
-    s_body = "";  // 换城市，旧城市的天气不能再用
+    bool changed = false;
+    {
+        CfgLock lk;
+        if (g_cfg.weatherCityCode != code) {
+            g_cfg.weatherCityCode = code;
+            changed = true;
+        }
+    }
+    if (!changed) return;
+    s_msg = "";   // 换城市，旧城市的天气不能再用
     s_date = "";
-    s_skdate = "";
-    s_tfc = s_tfd = s_lfc = s_lfd = 0;
     s_ts = 0;
-    cache_save();
+    s_hour = -1;
+    cfg_flush_weather();
 }
 
 // ---------------------------------------------------------------- 小工具
@@ -104,30 +84,6 @@ bool is_city_code(const String &s)
     for (size_t i = 0; i < s.length(); i++)
         if (s[i] < '0' || s[i] > '9') return false;
     return true;
-}
-
-// JSON 字符串转义（值和 webui.cpp 的 json_esc_append 一样）
-void jesc(String &out, const String &s)
-{
-    for (size_t i = 0; i < s.length(); i++) {
-        const uint8_t c = (uint8_t)s[i];
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    char b[8];
-                    snprintf(b, sizeof b, "\\u%04x", (unsigned)c);
-                    out += b;
-                } else {
-                    out += (char)c;
-                }
-                break;
-        }
-    }
 }
 
 // 取 "key":{...} 这个对象（浅层，第一个 '}' 就是结尾）
@@ -398,89 +354,49 @@ bool fetch_itboy(const String &code, WxData *d)
     return true;
 }
 
-// 成功时把内层字段拼进 *body（不含 {}），*ts 是拉取时刻，并给 LVGL 发事件
-bool fetch(const String &code, String *body, uint32_t *ts)
+// 成功时更新 g_cfg 的天气状态（换天固化 lastday，Go 语义）并生成播报文案
+bool fetch(const String &code, String *msg)
 {
     WxData d;
     if (!fetch_d1(code, &d) && !fetch_itboy(code, &d)) return false;
 
-    // lastday 语义照 Go：换天才把"昨天"固化（d1 没有昨天的数据，
-    // 用上次拉取缓存的 fc/fd；itboy 有 yesterday，直接用它的）
-    if (s_skdate.length() && s_skdate != d.date) {
-        s_lfc = s_tfc;
-        s_lfd = s_tfd;
+    // 对齐 Go GetWeather：sk.date != Today 才把旧 Today 固化成 Lastday
+    //（昨天的高低温取"换天前缓存的今天值"，Go 不用接口的 yesterday 字段）
+    bool day_changed = false;
+    {
+        CfgLock lk;
+        if (g_cfg.today.length() && g_cfg.today != d.date) {
+            g_cfg.lastday = g_cfg.today;
+            g_cfg.lastdayFc = g_cfg.todayFc;
+            g_cfg.lastdayFd = g_cfg.todayFd;
+            day_changed = true;
+        }
+        g_cfg.today = d.date;
+        g_cfg.todayFc = d.fc;
+        g_cfg.todayFd = d.fd;
     }
-    s_skdate = d.date;
-    s_tfc = d.fc;
-    s_tfd = d.fd;
-    if (!d.has_lastday && (s_lfc || s_lfd)) {
-        d.has_lastday = true;
-        d.lfc = s_lfc;
-        d.lfd = s_lfd;
+    if (day_changed) cfg_flush_weather();  // Go：只有换天才 Save
+
+    int lfc, lfd;
+    {
+        CfgLock lk;
+        lfc = g_cfg.lastdayFc;
+        lfd = g_cfg.lastdayFd;
     }
 
-    // ---- 播报文案，格式和 Go 版 GetWeather() 拼的一致
-    String msg = "今天是" + d.date + "，" + d.cityname + d.weather + "，" + String(d.fc) +
-                 "到" + String(d.fd) + "度，";
-    if (d.has_lastday && d.lfc) {
-        if (d.fc > d.lfc) msg += "最高比昨天高" + String(d.fc - d.lfc) + "度，";
-        else if (d.fc < d.lfc) msg += "最高比昨天低" + String(d.lfc - d.fc) + "度，";
-    }
-    if (d.has_lastday && d.lfd) {
-        if (d.fd > d.lfd) msg += "最低比昨天高" + String(d.fd - d.lfd) + "度，";
-        else if (d.fd < d.lfd) msg += "最低比昨天低" + String(d.lfd - d.fd) + "度，";
-    }
-    msg += "现在" + d.now_weather + "，" + d.temp + "度。" + d.alarm;
+    // ---- 播报文案，格式和 Go 版 GetWeather() 拼的一字不差
+    //（首日 lastday 为 0 时 Go 也会输出"比昨天高N度"，这里保持一致）
+    String m = "今天是" + d.date + "，" + d.cityname + d.weather + "，" + String(d.fc) + "到" +
+               String(d.fd) + "度，";
+    if (d.fc > lfc) m += "最高比昨天高" + String(d.fc - lfc) + "度，";
+    else if (d.fc < lfc) m += "最高比昨天低" + String(lfc - d.fc) + "度，";
+    if (d.fd > lfd) m += "最低比昨天高" + String(d.fd - lfd) + "度，";
+    else if (d.fd < lfd) m += "最低比昨天低" + String(lfd - d.fd) + "度，";
+    m += "现在" + d.now_weather + "，" + d.temp + "度。" + d.alarm;
 
-    // ---- 内层 JSON（键名对齐 Go 的 sk / fc 以及 conf 里的 today* / lastday*）
-    String b;
-    b.reserve(640);
-    b += "\"code\":\"";
-    b += code;
-    b += "\",\"cityname\":\"";
-    jesc(b, d.cityname);
-    b += "\",\"temp\":\"";
-    jesc(b, d.temp);
-    b += "\",\"weather\":\"";
-    jesc(b, d.weather);
-    b += "\",\"now_weather\":\"";
-    jesc(b, d.now_weather);
-    b += "\",\"date\":\"";
-    jesc(b, d.date);
-    b += "\",\"week\":\"";
-    jesc(b, d.week);
-    b += "\",\"ymd\":\"";
-    jesc(b, d.ymd);
-    b += "\",\"fc\":";
-    b += d.fc;
-    b += ",\"fd\":";
-    b += d.fd;
-    b += ",\"today\":\"";
-    jesc(b, d.date);
-    b += "\",\"todayFc\":";
-    b += d.fc;
-    b += ",\"todayFd\":";
-    b += d.fd;
-    if (d.has_lastday) {
-        b += ",\"lastday\":\"";
-        jesc(b, d.date);
-        b += "\",\"lastdayFc\":";
-        b += d.lfc;
-        b += ",\"lastdayFd\":";
-        b += d.lfd;
-    }
-    b += ",\"humidity\":\"";
-    jesc(b, d.humidity);
-    b += "\",\"quality\":\"";
-    jesc(b, d.quality);
-    b += "\",\"alarm\":\"";
-    jesc(b, d.alarm);
-    b += "\",\"msg\":\"";
-    jesc(b, msg);
-    b += "\"";
-
-    *body = b;
-    *ts = (uint32_t)time(nullptr);
+    s_msg = m;
+    s_date = time_ymd(false);
+    s_ts = (uint32_t)time(nullptr);
 
     // ---- 给 LVGL 发事件（对齐 Go 的 fmt.Println("WEATHER ...")）
     String ev = d.now_weather + d.temp + "℃";
@@ -488,20 +404,45 @@ bool fetch(const String &code, String *body, uint32_t *ts)
     app_bus_event(("WEATHER " + ev).c_str());
     app_bus_event(("WEATHERAL " + short_alarm(d.alarm)).c_str());
 
-    ALOG("weather", "fetch city=%s -> ok %uB", code.c_str(), (unsigned)b.length());
+    if (msg) *msg = m;
+    ALOG("weather", "fetch city=%s -> ok", code.c_str());
     return true;
 }
 
 }  // namespace
 
+// ---------------------------------------------------------------- 闹钟结束播报源
+
+String weather_play_url()
+{
+    // 1) 本地缓存里已经有 /downWeather 下载好的音频
+    String save;
+    {
+        CfgLock lk;
+        save = g_cfg.savePath;
+    }
+    while (save.length() > 1 && save.endsWith("/")) save.remove(save.length() - 1);
+    if (save.length() && save != "/" && save != ".") {
+        const String p = save + "/weather.mp3";
+        if (LittleFS.exists(p)) return p;
+    }
+    // 2) RAM 里有文案就现场生成 TTS 地址（流式播放；打开用长超时，见 player.cpp）
+    if (s_msg.length()) return String(kTtsUrl) + url_encode(s_msg);
+    return String();
+}
+
 // ---------------------------------------------------------------- 定时刷新
 
-// 对齐 Go 的定时器：整点/开机各拉一次，本小时内已有数据就跳过。
+// 对齐 Go 的定时器：整点/开机/weatherUpdate 各拉一次，本小时内已有数据就跳过。
 // alarm_tick 的整点 + NTP 同步后的开机首次都会调这里。
 void weather_refresh()
 {
-    cache_load();
-    if (!is_city_code(s_code)) return;
+    String code;
+    {
+        CfgLock lk;
+        code = g_cfg.weatherCityCode;
+    }
+    if (!is_city_code(code)) return;  // 没设城市码：什么都不做（对齐 Go GetWeather("")）
 
     const String today = time_ymd(false);
     if (!today.length()) return;  // 时间没同步，拉了也存不对日期
@@ -509,17 +450,10 @@ void weather_refresh()
     time_t now = time(nullptr);
     struct tm lt;
     localtime_r(&now, &lt);
-    if (s_body.length() && s_date == today && s_hour == lt.tm_hour) return;
+    if (s_date == today && s_hour == lt.tm_hour) return;  // 本小时内已拉过
 
-    String body;
-    uint32_t ts = 0;
-    if (fetch(s_code, &body, &ts)) {
-        s_body = body;
-        s_date = today;
-        s_ts = ts;
-        s_hour = lt.tm_hour;
-        cache_save();
-    }
+    String msg;
+    if (fetch(code, &msg)) s_hour = lt.tm_hour;
 }
 
 // 城市名 -> 9 位代码。toy1 的搜索接口必须带 Referer，而 http_get_str 的请求头
@@ -590,19 +524,16 @@ esp_err_t send_text(httpd_req_t *req, const String &body)
     return httpd_resp_send(req, body.c_str(), (ssize_t)body.length());
 }
 
-// 把内层字段包成完整响应；stale / ts 只在渲染时加，缓存里不用存
-String render(const String &body, bool stale, uint32_t ts)
+// Go router.go 的 js2home 逐字一致（/downWeather 的返回页用）
+const char JS2HOME[] =
+    "\n<script>setInterval(function(){window.history.go(-1)},3000);</script>"
+    "<style>@media(prefers-color-scheme:dark){body{color:#e0e0e0;background-color:#121212;}</style>";
+
+esp_err_t send_html(httpd_req_t *req, const String &body)
 {
-    String out;
-    out.reserve(body.length() + 48);
-    out += "{\"ok\":true,";
-    out += body;
-    out += ",\"stale\":";
-    out += stale ? "true" : "false";
-    out += ",\"ts\":";
-    out += String((unsigned long)ts);
-    out += '}';
-    return out;
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body.c_str(), (ssize_t)body.length());
 }
 
 int hex_val(char c)
@@ -652,95 +583,116 @@ bool query_get(httpd_req_t *req, const char *key, char *out, size_t cap)
     return true;
 }
 
-// ---------------------------------------------------------------- 路由
-
-// GET /getWeather[?code=xxx]
-esp_err_t h_get_weather(httpd_req_t *req)
+// Go strings.Trim(q, "区县市")：把两端的 区/县/市 字符去掉（UTF-8 每字 3 字节）
+String go_trim_chars(String s, const char *set3)
 {
-    cache_load();
-
-    char v[24];
-    const String param =
-        query_get(req, "code", v, sizeof v) ? appstr::trim(String(v)) : String();
-    // 第一次带 ?code= 就当默认城市存下来，否则下次不带参数会报"没有城市代码"
-    if (!s_code.length() && is_city_code(param)) set_code(param);
-    const String code = is_city_code(param) ? param : s_code;
-
-    if (!is_city_code(code)) {
-        ALOG("weather", "get -> no city code");
-        return send_json(req, "{\"ok\":false,\"error\":\"no city code\"}", "400 Bad Request");
-    }
-
-    // 带了别的城市代码就当成临时查询，不覆盖缓存里存的城市（对齐 Go 的 ?code=）
-    if (code != s_code) {
-        String body;
-        uint32_t ts = 0;
-        if (!fetch(code, &body, &ts))
-            return send_json(req, "{\"ok\":false,\"error\":\"fetch failed\"}");
-        return send_json(req, render(body, false, ts));
-    }
-
-    const String today = time_ymd(false);
-    bool fresh = s_body.length() && s_date == today;
-
-    if (!fresh) {
-        String body;
-        uint32_t ts = 0;
-        if (fetch(code, &body, &ts)) {
-            s_body = body;
-            s_date = today;
-            s_ts = ts;
-            cache_save();
-            fresh = true;
+    for (;;) {
+        bool changed = false;
+        for (int i = 0; i < 3; i++) {
+            const char *c = set3 + i * 3;
+            if (s.length() >= 3 && s.startsWith(c)) {
+                s = s.substring(3);
+                changed = true;
+                break;
+            }
+            if (s.length() >= 3 && s.endsWith(c)) {
+                s = s.substring(0, s.length() - 3);
+                changed = true;
+                break;
+            }
         }
+        if (!changed) break;
     }
-
-    if (!s_body.length()) {
-        // 没网又没缓存：回 200 + ok:false，别让前端崩在 500 上
-        return send_json(req, "{\"ok\":false,\"error\":\"weather unavailable\"}");
-    }
-
-    const String out = render(s_body, !fresh, s_ts);
-    ALOG("weather", "get city=%s -> %s %uB", code.c_str(), fresh ? "ok" : "stale",
-         (unsigned)out.length());
-    return send_json(req, out);
+    return s;
 }
 
-// GET /downWeather[?code=xxx]：强制重拉，成功后替换缓存
-esp_err_t h_down_weather(httpd_req_t *req)
-{
-    cache_load();
+// ---------------------------------------------------------------- 路由
 
+// GET /getWeather[?code=xxx]：对齐 Go——回纯文本播报文案，失败回空串（都是 200）
+esp_err_t h_get_weather(httpd_req_t *req)
+{
     char v[24];
     const String param =
         query_get(req, "code", v, sizeof v) ? appstr::trim(String(v)) : String();
-    if (is_city_code(param) && param != s_code) set_code(param);  // 明确要求刷新别的城市
 
-    const String code = is_city_code(param) ? param : s_code;
-    if (!is_city_code(code)) {
-        return send_json(req, "{\"ok\":false,\"error\":\"no city code\"}", "400 Bad Request");
+    String code;
+    if (is_city_code(param)) {
+        code = param;  // 临时查询别的城市，不改存档（对齐 Go ?code=）
+    } else {
+        CfgLock lk;
+        code = g_cfg.weatherCityCode;
+    }
+    if (!is_city_code(code)) return send_text(req, "");  // Go："没有code查什么？"-> 空串
+
+    String msg;
+    if (!fetch(code, &msg)) return send_text(req, "");  // 失败已打日志，回空串
+    return send_text(req, msg);
+}
+
+// GET /downWeather：对齐 Go player.DownWeather——重取天气并把 TTS 下载成
+// <savePath>/weather.mp3（配了缓存目录才有地方存，flash 大小不可控）。
+// TTS 服务器生成音频要几秒到几十秒，打开流用长超时。
+esp_err_t h_down_weather(httpd_req_t *req)
+{
+    String code, save;
+    {
+        CfgLock lk;
+        code = g_cfg.weatherCityCode;
+        save = g_cfg.savePath;
+    }
+    while (save.length() > 1 && save.endsWith("/")) save.remove(save.length() - 1);
+    if (!save.length() || save == "/" || save == ".") {
+        return send_html(req, String("<h1>未配置缓存目录，天气音频没地方存</h1>") + JS2HOME);
     }
 
-    String body;
-    uint32_t ts = 0;
-    if (!fetch(code, &body, &ts)) {
-        // 同城拉失败就什么都不动，缓存里上次的数据继续用
-        return send_json(req, "{\"ok\":false,\"error\":\"fetch failed\"}");
+    // Go：先删掉旧的，取文案，有文案才下载
+    LittleFS.remove(save + "/weather.mp3");
+    LittleFS.remove(save + "/weather2.mp3");
+
+    String msg;
+    if (!is_city_code(code) || !fetch(code, &msg) || !msg.length()) {
+        return send_html(req, String("<h1>下载完毕</h1>") + JS2HOME);  // Go 同款文案
     }
 
-    s_code = code;
-    s_body = body;
-    s_date = time_ymd(false);
-    s_ts = ts;
-    cache_save();
-    return send_json(req, "{\"ok\":true}");
+    const String url = String(kTtsUrl) + url_encode(msg);
+    const String tmp = save + "/weather2.mp3";
+    const String dst = save + "/weather.mp3";
+    int status = 0;
+    HttpStream *h = http_stream_open_to(url, "", &status, 30000);  // 首包等 30s
+    if (!h) {
+        ALOG("weather", "tts 下载失败 status=%d", status);
+        return send_html(req, String("<h1>下载完毕</h1>") + JS2HOME);
+    }
+
+    File f = LittleFS.open(tmp, "w");
+    if (!f) {
+        http_stream_close(h);
+        return send_html(req, String("<h1>下载完毕</h1>") + JS2HOME);
+    }
+    uint8_t buf[1024];
+    size_t total = 0;
+    for (;;) {
+        int n = http_stream_read(h, buf, sizeof buf, 10000);
+        if (n < 0) continue;  // 慢，接着等
+        if (n == 0) break;
+        if (f.write(buf, (size_t)n) != (size_t)n) break;
+        total += (size_t)n;
+    }
+    http_stream_close(h);
+    f.close();
+
+    if (total > 0 && LittleFS.rename(tmp, dst)) {
+        ALOG("weather", "tts 下载完成 %uB -> %s", (unsigned)total, dst.c_str());
+    } else {
+        LittleFS.remove(tmp);
+        ALOG("weather", "tts 下载失败（%uB），已清理", (unsigned)total);
+    }
+    return send_html(req, String("<h1>下载完毕</h1>") + JS2HOME);
 }
 
 // GET /getWeatherCityCode?code=101280102  或  ?q=番禺
 esp_err_t h_city_code(httpd_req_t *req)
 {
-    cache_load();
-
     char v[256];
     if (query_get(req, "code", v, sizeof v)) {
         const String code = appstr::trim(String(v));
@@ -758,11 +710,15 @@ esp_err_t h_city_code(httpd_req_t *req)
         }
         String code;
         if (!lookup_city_code(q, &code)) {
+            // 对齐 Go GetCityCode：查不到时去掉"区县市"后缀再试一次
+            const String s2 = go_trim_chars(q, "区县市");
+            if (s2.length() && s2 != q && lookup_city_code(s2, &code)) {
+                set_code(code);  // 顺手存档，页面上填的代码刷新后不丢
+                return send_text(req, code);
+            }
             // 文案和 Go 版的 errNoResult 一致；alarm.html 会把它直接塞进输入框
             return send_text(req, "没有结果");
         }
-        // 顺手存下来：ESP32 的 /updateCfg 不认识 weatherCityCode，
-        // 不在这里落 NVS 的话页面上填的代码刷新后就丢了。
         set_code(code);
         return send_text(req, code);  // 成功时回纯文本代码，和 Go 版一致
     }

@@ -24,6 +24,7 @@
 #include <time.h>
 
 #include "../app_bus.h"
+#include "../app/player.h"
 #include "../board_config.h"
 #include "../display_st7789.h"
 #include "../pcm_out.h"
@@ -766,8 +767,12 @@ void handle_client(Conn *k)
         }
     } else if (!strcmp(rq.path, "/") || !strcmp(rq.path, "/index.html")) {
         do_root(k, &rq, t0);
-    } else if (!strcmp(rq.path, "/volp") || !strcmp(rq.path, "/volm")) {
-        // 上位机音量 +/-：加一减一由上位机自己算好调 /volp /volm，这里只应答
+    } else if (!strcmp(rq.path, "/volp")) {
+        player_vol_up();
+        http_json(k, 200, "{\"ok\":true}");
+        log_req(k, &rq, 200, 14, t0);
+    } else if (!strcmp(rq.path, "/volm")) {
+        player_vol_down();
         http_json(k, 200, "{\"ok\":true}");
         log_req(k, &rq, 200, 14, t0);
     } else if (!strncmp(rq.path, "/flash", 6) || !strncmp(rq.path, "/music", 6)) {

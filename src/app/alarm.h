@@ -18,3 +18,7 @@ void alarm_tick();  // 每秒调一次（内部按分钟去重）；wake 命令�
 bool alarm_add(const String &hhmm, const String &types, String *msg);
 bool alarm_del_types(const String &hhmm, const String &types, String *msg);
 String alarm_list_json();
+
+// 强制重查工作日（对齐 Go conf.WorkDayApi：/updateCfg 改了 smallWeekDate、
+// /uploadCfg 换了配置后立刻生效）
+void alarm_workday_refresh();

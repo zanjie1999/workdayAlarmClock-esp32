@@ -294,25 +294,47 @@ static bool parse_playlist(const char *js, std::vector<String> *ids, String *nam
     return ids->size() > 0;
 }
 
-// ---------------------------------------------------------------- 歌单缓存
+// ---------------------------------------------------------------- 缓存（对齐 Go nemusic）
 
-// 缓存路径：savePath 为空返回空串 = 缓存功能整体关闭（对齐 Go 的 savePath 语义）
-static String playlist_cache_path()
+// savePath 规整成不带尾斜杠的目录；空/根 = 缓存功能整体关闭
+static String cache_dir()
 {
     String save;
     {
         CfgLock lk;
         save = g_cfg.savePath;
     }
-    if (!save.length()) return String();
     while (save.length() > 1 && save.endsWith("/")) save.remove(save.length() - 1);
-    if (save == "/" || save == ".") return String();
-    return save + "/playlist.json";
+    if (!save.length() || save == "/" || save == ".") return String();
+    return save;
 }
 
-static void save_cache(const String &id, const String &name, const std::vector<String> &ids)
+// 对齐 Go cacheNameRe：id 里只留文件名安全字符，其余换 _
+static String cache_base(const String &id)
 {
-    const String path = playlist_cache_path();
+    String o;
+    for (size_t i = 0; i < id.length(); i++) {
+        char c = id[i];
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            c == '_' || c == '-')
+            o += c;
+        else
+            o += '_';
+    }
+    return o;
+}
+
+// 歌单 id 列表缓存：<savePath>/<id>.list，每个歌单一个文件（对齐 Go listCachePath）
+static String list_cache_path(const String &id)
+{
+    const String dir = cache_dir();
+    if (!dir.length()) return String();
+    return dir + "/" + cache_base(id) + ".list";
+}
+
+static void save_list_cache(const String &id, const String &name, const std::vector<String> &ids)
+{
+    const String path = list_cache_path(id);
     if (!path.length()) return;  // 没设缓存目录，不写任何东西
 
     File f = LittleFS.open(path, "w");
@@ -340,11 +362,10 @@ static void save_cache(const String &id, const String &name, const std::vector<S
     ALOG("wyy", "歌单缓存已更新 %s (%u 首)", path.c_str(), (unsigned)ids.size());
 }
 
-bool wyy_has_cache() { return playlist_cache_path().length() && LittleFS.exists(playlist_cache_path()); }
-
-bool wyy_playlist_cached(const String &id, std::vector<String> *ids, String *name)
+// 读歌单缓存；存档里的 id 不一致只告警不拒绝（文件本来就是按请求 id 命名的）
+static bool load_list_cache(const String &id, std::vector<String> *ids, String *name)
 {
-    const String path = playlist_cache_path();
+    const String path = list_cache_path(id);
     if (!path.length()) return false;
     File f = LittleFS.open(path, "r");
     if (!f) return false;
@@ -358,8 +379,129 @@ bool wyy_playlist_cached(const String &id, std::vector<String> *ids, String *nam
     parse_str_array(js.c_str(), "\"ids\"", ids);
     if (!ids->size()) return false;
     if (name) *name = nm;
-    if (!cid.isEmpty() && cid != id) ALOG("wyy", "缓存歌单 id=%s 和请求的 %s 不一致", cid.c_str(), id.c_str());
+    if (!cid.isEmpty() && cid != id)
+        ALOG("wyy", "缓存歌单 id=%s 和请求的 %s 不一致", cid.c_str(), id.c_str());
     return true;
+}
+
+// 对齐 Go removeOldestMp3IfFull：目录里 .mp3 总量超 cacheLimit(MB) 就删最旧一个
+static void trim_music_cache()
+{
+    const String dir = cache_dir();
+    if (!dir.length()) return;
+    int64_t limit_mb;
+    {
+        CfgLock lk;
+        limit_mb = g_cfg.cacheLimit;
+    }
+    const int64_t bytes_per_mb = 1024 * 1024;
+    if (limit_mb <= 0 || limit_mb > (int64_t)0x7fffffffffffffffLL / bytes_per_mb) {
+        ALOG("wyy", "缓存上限无效: %lld MB", (long long)limit_mb);
+        return;
+    }
+
+    File d = LittleFS.open(dir, "r");
+    if (!d || !d.isDirectory()) return;
+    int64_t total = 0;
+    String oldest;
+    time_t oldest_time = 0;
+    File e = d.openNextFile();
+    while (e) {
+        String nm = e.name();
+        if (!nm.startsWith("/")) nm = "/" + nm;
+        String low = nm;
+        low.toLowerCase();
+        if (!e.isDirectory() && low.endsWith(".mp3")) {
+            total += (int64_t)e.size();
+            const time_t mt = e.getLastWrite();
+            if (!oldest.length() || mt < oldest_time) {
+                oldest = nm;
+                oldest_time = mt;
+            }
+        }
+        e.close();
+        e = d.openNextFile();
+    }
+    d.close();
+
+    if (total < limit_mb * bytes_per_mb) return;
+    if (!oldest.length()) {
+        ALOG("wyy", "缓存已达到上限，但没有可清理的MP3文件");
+        return;
+    }
+    if (LittleFS.remove(oldest)) {
+        ALOG("wyy", "缓存达到上限，删除最旧文件 %s", oldest.c_str());
+    } else {
+        ALOG("wyy", "删除最旧缓存文件失败 %s", oldest.c_str());
+    }
+}
+
+// 把 url 下载到 path（小文件，同步下载）；失败删半成品返回 false
+static bool download_to_file(const String &url, const String &path)
+{
+    HttpStream *h = http_stream_open(url, "", nullptr);
+    if (!h) return false;
+    File f = LittleFS.open(path, "w");
+    if (!f) {
+        http_stream_close(h);
+        return false;
+    }
+    uint8_t buf[2048];
+    bool ok = true;
+    for (;;) {
+        int n = http_stream_read(h, buf, sizeof buf, 10000);
+        if (n < 0) continue;  // 网络慢，接着等
+        if (n == 0) break;
+        if (f.write(buf, (size_t)n) != (size_t)n) {
+            ok = false;
+            break;
+        }
+    }
+    http_stream_close(h);
+    f.close();
+    if (!ok) LittleFS.remove(path);
+    return ok;
+}
+
+// 对齐 Go nemusic.MusicUrl：缓存命中直接放本地；没命中取地址后下载进缓存
+bool wyy_music_path(const String &id, String *path, uint32_t *dur_ms)
+{
+    const String dir = cache_dir();
+    if (dir.length()) {
+        const String cache_file = dir + "/" + cache_base(id) + ".mp3";
+        if (LittleFS.exists(cache_file)) {
+            ALOG("wyy", "播放缓存 %s", cache_file.c_str());
+            *path = cache_file;
+            if (dur_ms) *dur_ms = 0;  // 本地文件不查接口时长，UI 进度走不确定态
+            return true;
+        }
+    }
+
+    String url;
+    if (!wyy_song_url(id, &url, dur_ms)) return false;
+    if (!dir.length()) {  // 没配缓存目录：纯在线播放
+        *path = url;
+        return true;
+    }
+
+    trim_music_cache();
+    const String cache_file = dir + "/" + cache_base(id) + ".mp3";
+    const String tmp = cache_file + ".tmp";
+    ALOG("wyy", "开始下载到 %s", cache_file.c_str());
+    if (download_to_file(url, tmp) && LittleFS.rename(tmp, cache_file)) {
+        *path = cache_file;
+        return true;
+    }
+    LittleFS.remove(tmp);
+    *path = url;  // 下载失败回退在线地址（Go 同款行为）
+    return true;
+}
+
+bool wyy_has_cache() { return cache_dir().length() > 0; }
+
+bool wyy_playlist_cached(const String &id, std::vector<String> *ids, String *name)
+{
+    return load_list_cache(id, ids, name);
 }
 
 bool wyy_playlist(const String &id, std::vector<String> *ids, String *name)
@@ -376,7 +518,7 @@ bool wyy_playlist(const String &id, std::vector<String> *ids, String *name)
         bool ok = parse_playlist(buf, ids, name);
         free(buf);
         if (ok) {
-            save_cache(id, name ? *name : String(), *ids);
+            save_list_cache(id, name ? *name : String(), *ids);
             return true;
         }
     }

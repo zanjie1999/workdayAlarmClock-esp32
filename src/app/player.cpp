@@ -24,6 +24,7 @@
 #include "autoplay.h"
 #include "n32_link.h"
 #include "pcm_out.h"
+#include "../web/web_weather.h"  // weather_play_url()：闹钟结束的天气播报源
 
 // ---------------------------------------------------------------- SongList
 
@@ -120,6 +121,7 @@ struct PlayerState {
     bool stop = true;
     bool paused = false;
     bool alarm = false;
+    bool play_weather = false;  // 闹钟结束后的天气播报阶段（Go 的 IsPlayWeather）
     bool loop = false;      // 闹钟歌单循环（autoplay_alarm_build 给的）
     int loop_mode = PLAYER_LOOP_SEQUENTIAL;  // 用户循环模式，见 player.h
     bool prev_rdm = false;  // PrevRdmFlag
@@ -155,6 +157,7 @@ enum {
     CMD_PLAY_URL,
     CMD_PLAY_PLAYLIST,
     CMD_PLAY_MUSIC,
+    CMD_PLAY_MUSIC_LIST,
     CMD_PLAY_ALARM,
     CMD_VOL_SET,
     CMD_VOL_UP,
@@ -168,6 +171,7 @@ struct Cmd {
     int type;
     int ival;
     String s;
+    String s2;  // CMD_PLAY_MUSIC_LIST：歌单 id（s 是逗号分隔的 id 列表）
 };
 
 struct Job {
@@ -175,17 +179,44 @@ struct Job {
     uint32_t gen;
 };
 
-static void post(int type, const String &s = String(), int ival = 0)
+static void post(int type, const String &s = String(), int ival = 0,
+                 const String &s2 = String())
 {
     if (!s_cq) return;
     Cmd *c = new Cmd();
     c->type = type;
     c->ival = ival;
     c->s = s;
+    c->s2 = s2;
     if (xQueueSend(s_cq, &c, 0) != pdTRUE) {
         ALOG("player", "命令队列满，丢弃 type=%d", type);
         delete c;
     }
+}
+
+// 读界面音量缓存 /wac_ui.conf 的 volume= 行（ui_settings.c 写的同一份）。
+// 对齐 Go+LVGL：外壳开机第一屏显示的就是它，比配置里的 volDefault 更接近
+// 用户上次真实听到的音量。读不到退回 def。
+static int ui_conf_volume(int def)
+{
+    if (!LittleFS.exists("/wac_ui.conf")) return def;
+    File f = LittleFS.open("/wac_ui.conf", "r");
+    if (!f) return def;
+    int val = def;
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        int eq = line.indexOf('=');
+        if (eq <= 0) continue;
+        String key = line.substring(0, eq);
+        key.trim();
+        if (key != "volume") continue;
+        int v = line.substring(eq + 1).toInt();
+        if (v >= 0 && v <= 100) val = v;
+        break;
+    }
+    f.close();
+    return val;
 }
 
 // ---------------------------------------------------------------- 小工具
@@ -229,6 +260,19 @@ static String name_of_source(const String &v)
 // 曲名代次：s.name 每次变化 +1（release），等待方 acquire 读。
 // web 端 /next /prev 是异步切歌，靠对比代次等新曲名就绪再回页面。
 static std::atomic<uint32_t> s_name_gen{0};
+
+// 语义文案（对齐 Go /next /prev /playlist 的返回值）+ 代次
+static String s_status;
+static std::atomic<uint32_t> s_status_gen{0};
+
+static void set_status(const String &t)
+{
+    {
+        PLock lk;
+        s_status = t;
+    }
+    s_status_gen.fetch_add(1, std::memory_order_release);
+}
 
 // 曲名查不到就退回老文案（Go echoSong）
 static void echo_song(const String &id, const String &fallback)
@@ -342,13 +386,17 @@ static bool stream_track(const String &url, uint32_t gen)
             CfgLock lk;
             cookie = g_cfg.cookie;
         }
+        // TTS（dds.dui.ai）要现场生成音频，几十秒才回首包；普通 CDN 很快。
+        // 首包超时按目标区分，读流阶段的超时不变。
+        const uint32_t open_to =
+            (url.indexOf("dds.dui.ai") >= 0) ? 30000u : 5000u;
         int status = 0;
         for (int attempt = 0; attempt < 3 && !h; attempt++) {
             if (attempt) {
                 ALOG("player", "音频流连接重试 %d/2", attempt);
                 vTaskDelay(pdMS_TO_TICKS(500));
             }
-            h = http_stream_open(url, cookie, &status);
+            h = http_stream_open_to(url, cookie, &status, open_to);
         }
         if (!h) {
             ALOG("player", "打开音频流失败 (%d) %s", status, url.c_str());
@@ -445,6 +493,10 @@ static void stream_task(void *arg)
 
         if (cancelled(gen)) continue;
 
+        // 起播前把当前音量重写一次硬件：闹钟/停止时的设置发生在控制线程，
+        // N32 偶尔会丢一档，这里保证开声那一刻的实际音量 = UI 显示值
+        n32_set_volume((uint8_t)player_vol());
+
         bool ok = stream_track(url, gen);
         if (!cancelled(gen)) {
             // 自然放完：等环里剩下的放完再让 ctrl 决定下一首（不用 drain 标志，
@@ -467,7 +519,7 @@ static void ctrl_start(const String &url)
     uint32_t gen;
     {
         PLock lk;
-        if (s.stop && !s.alarm) mute_restore = true;
+        if (s.stop && !s.alarm && !s.play_weather) mute_restore = true;
         s.prev_url = s.now_url;
         s.prev_id = s.now_id;
         s.now_url = url;
@@ -515,16 +567,18 @@ static void ctrl_start(const String &url)
 
 static void do_stop()
 {
-    bool was_alarm;
+    bool was_alarm, was_weather;
     String nid, nurl;
     {
         PLock lk;
         was_alarm = s.alarm;
+        was_weather = s.play_weather;
         nid = s.now_id;
         nurl = s.now_url;
         s.name = "";
         s_name_gen.fetch_add(1, std::memory_order_release);
         s.alarm = false;
+        s.play_weather = false;
         s.loop = false;
         s.loop_mode = PLAYER_LOOP_SEQUENTIAL;
         s.prev_rdm = false;
@@ -549,25 +603,38 @@ static void do_stop()
 
     if (was_alarm && nid.length()) cfg_mark_played(nid);
 
+    // 对齐 Go Stop()：闹钟结束时先播天气（IsPlayWeather），播完的第二次 Stop
+    // 才真正结束闹钟（恢复默认音量 + ALARMSTOP）。120s 放不出来就兜底停。
     if (was_alarm) {
-        int v = 50;
-        bool mute = false;
-        {
-            CfgLock lk;
-            v = g_cfg.volDefault.toInt();
-            mute = g_cfg.muteWhenStop;
+        const String url = weather_play_url();
+        if (url.length()) {
+            {
+                PLock lk;
+                s.play_weather = true;
+                s.alarm_deadline = millis() + 120000;
+            }
+            ctrl_start(url);
+            ALOG("player", "闹钟结束，播报天气");
+            return;
         }
+        ALOG("player", "闹钟结束（没有天气可播）");
+    }
+
+    // 真正的结束
+    int v = 50;
+    bool mute = false;
+    {
+        CfgLock lk;
+        v = g_cfg.volDefault.toInt();
+        mute = g_cfg.muteWhenStop;
+    }
+    if (was_alarm || was_weather) {
         apply_volume(mute ? 0 : v, true);
         app_bus_event("ALARMSTOP");
-        app_bus_event("ALARMOFF");
+        app_bus_event("ALARMOFF");  // Go 不发，但 UI 对两个事件都做"结束响铃"，保留无害
         ALOG("player", "闹钟结束");
-    } else {
-        bool mute = false;
-        {
-            CfgLock lk;
-            mute = g_cfg.muteWhenStop;
-        }
-        if (mute) apply_volume(0, true);
+    } else if (mute) {
+        apply_volume(0, true);
         ALOG("player", "停止播放");
     }
 }
@@ -590,16 +657,19 @@ static void ctrl_next(bool from_done)
         }
 
         if (loop && nowurl.length()) {
+            set_status(nowurl);  // Go：LoopMode 时 Next 返回当前 URL
             ctrl_start(nowurl);
             return;
         }
         // 单曲循环：重播当前曲（Go 的 LoopMode 语义，按键 next 也一样）
         if (mode == PLAYER_LOOP_SINGLE && nowurl.length()) {
+            set_status(nowurl);
             ctrl_start(nowurl);
             return;
         }
         // 单次：本曲放完就停，不再推进队列
         if (mode == PLAYER_LOOP_ONCE && from_done && nowurl.length()) {
+            set_status("停止播放");
             do_stop();
             return;
         }
@@ -623,6 +693,7 @@ static void ctrl_next(bool from_done)
             }
         }
         if (empty) {
+            set_status("停止播放");  // Go：Next 里队列空了 Stop() 返回"停止播放"
             do_stop();
             return;
         }
@@ -631,6 +702,7 @@ static void ctrl_next(bool from_done)
         String fallback = left > 0 ? ("待播放 " + String(left)) : String("正在播放");
 
         if (looks_like_source(item)) {
+            set_status(item);  // Go：返回 URL 本身
             ctrl_start(item);
             {
                 PLock lk;
@@ -644,7 +716,8 @@ static void ctrl_next(bool from_done)
         send_ev("SONGID " + item);
         String url;
         uint32_t dur = 0;
-        if (wyy_song_url(item, &url, &dur)) {
+        if (wyy_music_path(item, &url, &dur)) {  // 缓存命中放本地，否则下载进缓存
+            set_status(url);  // Go：返回拿到的播放地址
             s_pending_dur.store(dur);
             ctrl_start(url);
             {
@@ -686,10 +759,13 @@ static void ctrl_play_playlist(const String &id, bool random)
 
     if (ids.empty()) {
         ALOG("player", "歌单为空: %s", id.c_str());
+        set_status("停止播放");
         do_stop();
         return;
     }
     if (random) ids.shuffle();
+
+    set_status(name);  // Go：PlayNePlaylist 返回歌单名
 
     {
         PLock lk;
@@ -711,7 +787,7 @@ static void ctrl_play_music(const String &id)
 
     String url;
     uint32_t dur = 0;
-    if (!wyy_song_url(id, &url, &dur)) {
+    if (!wyy_music_path(id, &url, &dur)) {  // 缓存命中放本地，否则下载进缓存
         ALOG("player", "播放歌曲失败: %s", id.c_str());
         return;
     }
@@ -721,6 +797,27 @@ static void ctrl_play_music(const String &id)
         PLock lk;
         s.now_id = id;
     }
+}
+
+// 对齐 Go PlayNeMusicList：前端解析好的 id 列表直接进队列，random 打乱
+static void ctrl_play_music_list(const std::vector<String> &ids, const String &pid, bool random)
+{
+    {
+        PLock lk;
+        s.prev_rdm = true;
+        s.loop = false;
+        s.loop_mode = PLAYER_LOOP_SEQUENTIAL;
+        s.playlist_id = pid;
+        s.playlist.clear();
+    }
+    SongList list;
+    for (size_t i = 0; i < ids.size(); i++) list.push(ids[i]);
+    if (random) list.shuffle();
+    {
+        PLock lk;
+        s.playlist.swap(list);
+    }
+    ctrl_next(false);
 }
 
 static void ctrl_prev()
@@ -738,6 +835,7 @@ static void ctrl_prev()
     }
 
     if (rdm) {
+        set_status("随机播放列表");  // Go：Prev 随机分支的返回值
         send_ev("ECHO 随机播放列表");
         {
             PLock lk;
@@ -752,6 +850,7 @@ static void ctrl_prev()
     }
 
     if (prev_url.length()) {
+        set_status("上一首");
         echo_song(prev_id, "上一首");
         {
             PLock lk;
@@ -775,6 +874,7 @@ static void ctrl_prev()
         CfgLock lk;
         def = g_cfg.defPlayListId;
     }
+    set_status(def.startsWith("http") ? ("播放默认URL" + def) : ("播放默认歌单" + def));
     send_ev("ECHO 播放歌单" + def);
     {
         PLock lk;
@@ -959,6 +1059,19 @@ static void handle_cmd(Cmd *c)
         case CMD_PLAY_URL: ctrl_start(c->s); break;
         case CMD_PLAY_PLAYLIST: ctrl_play_playlist(c->s, c->ival != 0); break;
         case CMD_PLAY_MUSIC: ctrl_play_music(c->s); break;
+        case CMD_PLAY_MUSIC_LIST: {
+            // 逗号分隔 id 列表还原成 vector（id 是数字/URL，不会含逗号）
+            std::vector<String> ids;
+            int b = 0;
+            while (b <= (int)c->s.length()) {
+                int e = c->s.indexOf(',', b);
+                if (e < 0) e = (int)c->s.length();
+                if (e > b) ids.push_back(c->s.substring(b, e));
+                b = e + 1;
+            }
+            ctrl_play_music_list(ids, c->s2, c->ival != 0);
+            break;
+        }
         case CMD_PLAY_ALARM: ctrl_play_alarm(); break;
         case CMD_VOL_SET: apply_volume(c->ival, true); break;
         case CMD_VOL_UP: app_bus_event("VOLP"); apply_volume(player_vol() + 5, true); break;
@@ -1028,6 +1141,7 @@ void player_begin()
         CfgLock lk;
         v = g_cfg.volDefault.toInt();
     }
+    v = ui_conf_volume(v);  // wac_ui.conf 的音量缓存优先，没有才用 volDefault
     {
         PLock lk;
         s.vol = v;
@@ -1058,6 +1172,29 @@ void player_play_url(const String &url) { post(CMD_PLAY_URL, url); }
 void player_play_playlist(const String &id, bool random) { post(CMD_PLAY_PLAYLIST, id, random ? 1 : 0); }
 void player_play_music(const String &id) { post(CMD_PLAY_MUSIC, id); }
 void player_play_alarm() { post(CMD_PLAY_ALARM); }
+
+// /playmusiclist POST：整个 id 列表进队列
+void player_play_music_list(const std::vector<String> &ids, const String &playlist_id, bool random)
+{
+    if (ids.empty()) return;
+    // 列表转成一行逗号串入队（CMD 类型复用 CMD_PLAY_PLAYLIST 的槽位太绕，直接带串）
+    String joined;
+    joined.reserve(ids.size() * 12 + 8);
+    for (size_t i = 0; i < ids.size(); i++) {
+        if (i) joined += ',';
+        joined += ids[i];
+    }
+    post(CMD_PLAY_MUSIC_LIST, joined, random ? 1 : 0, playlist_id);
+}
+
+String player_status_line()
+{
+    if (!s_mu) return String();
+    PLock lk;
+    return s_status;
+}
+
+uint32_t player_status_gen() { return s_status_gen.load(std::memory_order_acquire); }
 
 bool player_is_stop()
 {

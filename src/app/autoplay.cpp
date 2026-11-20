@@ -171,8 +171,9 @@ bool autoplay_alarm_build(SongList *out, bool *loop_fallback, String *label)
                 out->swap(remote);
                 *label = name;
                 ALOG("autoplay", "闹钟用网易云曲目 %d 首（无本地缓存）", out->n);
-                // 万一每首都取不到地址，后面还垫一个本地文件兜底
-                if (LittleFS.exists("/music/alarm.mp3")) out->push("/music/alarm.mp3");
+                // 万一每首都取不到地址，后面还垫一个兜底文件（同 Go 的 music.mp3 垫底）
+                const String fb = cfg_music_fallback_path();
+                if (fb.length()) out->push(fb);
                 return true;
             }
         } else {

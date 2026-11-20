@@ -13,11 +13,19 @@
 // ---------------------------------------------------------------- WiFi
 
 static uint32_t s_last_try = 0;
-static int  s_fail_cnt = 0;      // 连续失败次数
+static uint32_t s_down_since = 0;  // 本次断连的起始时刻，0 = 在线
 static bool s_fallback_ap = false;
 static bool s_was_up = false;
 static volatile bool s_link_up = false;
+static volatile bool s_sta_paused = false;  // WiFi 扫描期间暂停 STA 重试（扫描会抢射频）
 static uint32_t s_ntp_retry_at = 0;
+
+// WiFi 扫描（/scan）前后调：暂停时 net_loop 完全不碰 STA，扫完自动恢复
+void net_pause_sta(bool on)
+{
+    s_sta_paused = on;
+    if (on) WiFi.disconnect(false, false);  // 停掉进行中的连接尝试，不清凭据
+}
 
 void net_begin()
 {
@@ -69,10 +77,10 @@ void net_loop()
     const bool was_up = s_link_up;
     s_link_up = up;
     if (up) {
+        s_down_since = 0;
         if (!s_was_up) {
             s_was_up = true;
             ALOG("net", "WiFi 已连接, IP=%s", WiFi.localIP().toString().c_str());
-            s_fail_cnt = 0;
             if (s_fallback_ap) {
                 s_fallback_ap = false;
                 WiFi.softAPdisconnect(true);
@@ -105,29 +113,26 @@ void net_loop()
         return;
     }
     s_was_up = false;
-    // 前 3 次快速重试（每 3 秒），之后降为每 20 秒，避免路由器刚重启时干等。
-    const uint32_t interval = (s_fail_cnt < 3) ? 3000u : 20000u;
-    if (millis() - s_last_try > interval) {
+    if (!s_down_since) s_down_since = millis();
+
+    // 每 3 秒重试一次 STA；扫描期间（s_sta_paused）完全不碰 STA
+    if (!s_sta_paused && millis() - s_last_try > 3000) {
         s_last_try = millis();
-        if (++s_fail_cnt <= 4) {
-            ALOG("net", "WiFi 未连接(status=%d)，第 %d 次重试", (int)st, s_fail_cnt);
-            WiFi.disconnect(false, false);
-            WiFi.begin(ssid.c_str(), pass.c_str());
-        } else if (!s_fallback_ap) {
-            // 连了 4 次（约 80 秒）还是不行，退回配网：开热点让你改密码。
-            // STA 侧继续每 20 秒重试，扫到信号就自动连回来、关掉热点。
-            s_fallback_ap = true;
-            WiFi.mode(WIFI_AP_STA);
-            WiFi.softAP("workdayAlarmClock");
-            // 关键：热点开了不等于能访问，80 端口服务器得在这里启动，
-            // 否则连上 4.1 是"连接被拒绝"，连配网页都打不开。
-            if (!http80_running() && http80_start()) {
-                ALOG("net", "配网服务器已在 192.168.4.1:80 启动");
-            }
-            ALOG("net", "连不上(%d 次)，退回配网 192.168.4.1/setup（仍在后台重试）", s_fail_cnt);
-        } else {
-            WiFi.begin(ssid.c_str(), pass.c_str());
+        ALOG("net", "WiFi 未连接(status=%d)，重试", (int)st);
+        WiFi.disconnect(false, false);
+        WiFi.begin(ssid.c_str(), pass.c_str());
+    }
+    // 连不上 20 秒就开配网热点；STA 后台继续重试，扫到信号自动连回、关掉热点。
+    // 热点开了不等于能访问，80 端口服务器必须在这里启动，
+    // 否则连上 4.1 是"连接被拒绝"，连配网页都打不开。
+    if (!s_fallback_ap && millis() - s_down_since > 20000) {
+        s_fallback_ap = true;
+        WiFi.mode(WIFI_AP_STA);
+        WiFi.softAP("workdayAlarmClock");
+        if (!http80_running() && http80_start()) {
+            ALOG("net", "配网服务器已在 192.168.4.1:80 启动");
         }
+        ALOG("net", "连不上(20 秒)，退回配网 192.168.4.1/setup（仍在后台重试）");
     }
 }
 
@@ -281,7 +286,8 @@ static bool read_line(WiFiClient *c, String *out, uint32_t timeout_ms)
 }
 
 static HttpStream *stream_open(const char *method, const String &url, const String &cookie,
-                               const String &body, const char *ctype, int *status)
+                               const String &body, const char *ctype, int *status,
+                               uint32_t timeout_ms = 5000)
 {
     if (status) *status = 0;
     if (!net_connected()) {
@@ -310,8 +316,8 @@ static HttpStream *stream_open(const char *method, const String &url, const Stri
                 return nullptr;
             }
             s->secure->setInsecure();  // 省 RAM，不校验证书
-            s->secure->setTimeout(5);
-            if (s->secure->connect(host.c_str(), port, 5000) != 1) {
+            s->secure->setTimeout((int)(timeout_ms / 1000));
+            if (s->secure->connect(host.c_str(), port, timeout_ms) != 1) {
                 ALOG("net", "TLS 连接失败 %s:%u", host.c_str(), (unsigned)port);
                 s->close_conn();
                 delete s;
@@ -319,8 +325,8 @@ static HttpStream *stream_open(const char *method, const String &url, const Stri
             }
             s->c = s->secure;
         } else {
-            s->plain.setTimeout(5);
-            if (s->plain.connect(host.c_str(), port, 5000) != 1) {
+            s->plain.setTimeout((int)(timeout_ms / 1000));
+            if (s->plain.connect(host.c_str(), port, timeout_ms) != 1) {
                 ALOG("net", "连接失败 %s:%u", host.c_str(), (unsigned)port);
                 delete s;
                 return nullptr;
@@ -354,7 +360,7 @@ static HttpStream *stream_open(const char *method, const String &url, const Stri
         if (body.length()) s->c->print(body);
 
         String line;
-        if (!read_line(s->c, &line, 5000) || !line.startsWith("HTTP/")) {
+        if (!read_line(s->c, &line, timeout_ms) || !line.startsWith("HTTP/")) {
             ALOG("net", "响应头异常 %s", cur.c_str());
             s->close_conn();
             delete s;
@@ -365,7 +371,7 @@ static HttpStream *stream_open(const char *method, const String &url, const Stri
         String location;
         bool chunked = false;
         for (int i = 0; i < 48; i++) {
-            if (!read_line(s->c, &line, 5000)) break;
+            if (!read_line(s->c, &line, timeout_ms)) break;
             if (!line.length()) break;
             String low = line;
             low.toLowerCase();
@@ -395,6 +401,12 @@ static HttpStream *stream_open(const char *method, const String &url, const Stri
 HttpStream *http_stream_open(const String &url, const String &cookie, int *status)
 {
     return stream_open("GET", url, cookie, "", nullptr, status);
+}
+
+HttpStream *http_stream_open_to(const String &url, const String &cookie, int *status,
+                                uint32_t timeout_ms)
+{
+    return stream_open("GET", url, cookie, "", nullptr, status, timeout_ms);
 }
 
 int http_stream_read(HttpStream *s, uint8_t *buf, int len, uint32_t timeout_ms)

@@ -12,6 +12,8 @@ void net_loop();  // 由系统任务周期调用，负责断线重连
 bool net_connected();
 void net_set_credentials(const String &ssid, const String &pass);
 String net_ip();
+// WiFi 扫描（/scan）期间暂停 STA 重试：AP_STA 下连接尝试会跟扫描抢射频
+void net_pause_sta(bool on);
 
 // ---------------------------------------------------------------- 时间
 // 走 NTP（阿里 203.107.6.88 / ntp.aliyun.com）；开机没网时用 NVS 里上次的时间兜底。
@@ -29,6 +31,9 @@ struct HttpStream;  // 不透明，内部是 WiFiClient / WiFiClientSecure
 
 // 打开一个流式 GET（HTTP/1.0，body 原样读出，兼容 chunked）。失败返回 nullptr。
 HttpStream *http_stream_open(const String &url, const String &cookie, int *status);
+// 同上，但连接/首包用自定义超时（毫秒）：TTS 生成音频要几十秒，普通 CDN 用默认 5s 版
+HttpStream *http_stream_open_to(const String &url, const String &cookie, int *status,
+                                uint32_t timeout_ms);
 int http_stream_read(HttpStream *s, uint8_t *buf, int len, uint32_t timeout_ms);  // -1 超时, 0 EOF
 void http_stream_close(HttpStream *s);
 

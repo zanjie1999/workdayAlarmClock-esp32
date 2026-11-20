@@ -327,7 +327,9 @@ bool pcm_out_begin(void)
     eq_begin();
     eq_set_rate(OUT_RATE);
 
-    BaseType_t ok = xTaskCreatePinnedToCore(pcm_task, "pcm_out", 4096, NULL, 2, &s_task, 0);
+    // 核 1 = 音频链专用核（player_ctl/player_io/alarm 同核）；
+    // 核 0 留给 WiFi/lwIP + LVGL + 80 口 httpd + 8080（见 platformio.ini 的 ARDUINO_RUNNING_CORE）
+    BaseType_t ok = xTaskCreatePinnedToCore(pcm_task, "pcm_out", 4096, NULL, 2, &s_task, 1);
     if (ok != pdPASS) {
         Serial.println("[pcm] task create failed");
         s_inited = false;

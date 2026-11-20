@@ -77,6 +77,7 @@ httpd_handle_t http80_start(void)
     cfg.max_uri_handlers = 64;   // 实际约 41 条；45058 是重复注册，不是槽位不够
     cfg.lru_purge_enable = true;
     cfg.stack_size = 16384;  // 代理要在 httpd 任务里做 TLS 握手，8K 栈不够
+    cfg.core_id = 0;  // 定核 0（默认 tskNO_AFFINITY 会浮动到核 1 抢解码）；与 LVGL/8080 同核
     cfg.recv_wait_timeout = 5;
     cfg.send_wait_timeout = 5;
 

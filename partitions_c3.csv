@@ -1,0 +1,6 @@
+# AlphaPi 微控制器 (ESP32-C3, 4MB flash) -- 无 OTA 布局
+# app 大小对齐原厂 factory 分区 (2031616 = 0x1F0000)，其余全给 LittleFS（音乐缓存）
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+app,      app,  factory,  0x10000,  0x1F0000,
+assets,   data, spiffs,   0x200000, 0x200000,

@@ -27,7 +27,13 @@ static const char *kWyyMod =
     "ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe"
     "4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7";
 static const char *kWyyKeyChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+#if WAC_HEADLESS
+// C3 内存紧：TLS 会话 ~35KB/次，逐首解析扛不住。weapi 加密在应用层，
+// music.163.com 的 http 端点实测可用（playlist detail 接口同款走法，返回 200）
+static const char *kWyySongApi = "http://music.163.com/weapi/song/enhance/player/url/v1";
+#else
 static const char *kWyySongApi = "https://music.163.com/weapi/song/enhance/player/url/v1";
+#endif
 
 // ---------------------------------------------------------------- 加密
 
@@ -512,8 +518,18 @@ bool wyy_playlist(const String &id, std::vector<String> *ids, String *name)
         cookie = g_cfg.cookie;
     }
     size_t len = 0;
-    char *buf = http_get_ps("http://music.163.com/api/v6/playlist/detail?n=0&id=" + id, cookie,
-                            160 * 1024, &len, 2);
+#if WAC_HEADLESS
+    // C3 无 PSRAM：实测 free ~79KB 且 TLS 会话过后碎片化（maxblk 21~30KB 晃），
+    // 缩到 12KB + 曲目限 50（50 首 JSON ≈ 5~10KB）
+    const size_t cap = 12 * 1024;
+    const char *n_arg = "50";
+#else
+    const size_t cap = 160 * 1024;
+    const char *n_arg = "0";
+#endif
+    char *buf = http_get_ps(
+        String("http://music.163.com/api/v6/playlist/detail?n=") + n_arg + "&id=" + id, cookie,
+        cap, &len, 2);
     if (buf) {
         bool ok = parse_playlist(buf, ids, name);
         free(buf);

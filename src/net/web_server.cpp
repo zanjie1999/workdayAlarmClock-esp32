@@ -26,10 +26,13 @@
 #include "../app_bus.h"
 #include "../app/player.h"
 #include "../board_config.h"
-#include "../display_st7789.h"
 #include "../pcm_out.h"
-#include "mjpeg.h"
 #include "webdav.h"
+
+#if !WAC_HEADLESS
+#include "../display_st7789.h"  // 仅 /fb 的 MJPEG 推屏用到（headless 不编译）
+#include "mjpeg.h"
+#endif
 
 #define HTTP_MAX_CLIENTS 3
 #define HTTP_IDLE_MS 3000      // 收数据空闲超时（= 断流判定）
@@ -484,6 +487,15 @@ void do_aplayinfo(Conn *k, HttpReq *rq, uint32_t t0)
 
 // ---------------------------------------------------------------- /fb
 
+#if WAC_HEADLESS
+// 无屏构建：JPEGDEC 和显示驱动都不编译，/fb 直接返回不支持（/fbinfo 保留，无害）
+void do_fb(Conn *k, HttpReq *rq, uint32_t t0)
+{
+    http_error(k, 501, "no display");
+    log_req(k, rq, 501, 0, t0);
+}
+#else
+
 // 从 Content-Type 里抠 boundary；没有就返回 false（调用方回退到 "ffmpeg"）
 bool parse_boundary(const char *ctype, char *out, size_t cap)
 {
@@ -638,6 +650,7 @@ void do_fb(Conn *k, HttpReq *rq, uint32_t t0)
          rq->method, rq->path, (int)strlen(boundary), (unsigned)frames, (unsigned)jbytes,
          (unsigned long)(millis() - t0));
 }
+#endif  // !WAC_HEADLESS
 
 // ---------------------------------------------------------------- 其它路由
 

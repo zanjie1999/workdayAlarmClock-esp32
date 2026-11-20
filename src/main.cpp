@@ -1,21 +1,101 @@
 // main.cpp -- 启动与主循环
 //
-// 顺序：屏 -> LVGL -> 界面 -> N32 -> PCM -> 配置 -> 网络(可能要配网) -> HTTP -> 播放器
+// S3（AlphaPi One）顺序：屏 -> LVGL -> 界面 -> N32 -> PCM -> 配置 -> 网络(可能要配网) -> HTTP -> 播放器
 // 这里只是把各模块接起来，具体实现在各自目录里。
+//
+// WAC_HEADLESS=1（env:alphapi-c3）编译 AlphaPi 微控制器（ESP32-C3）分支：
+// 无屏无 LVGL，5x5 LED 点阵当"屏幕"，80/8080 web 与播放器/闹钟原样保留。
 #include <Arduino.h>
-#include <lvgl.h>
+#include <Wire.h>
+#include <esp_heap_caps.h>
 
-#include "board_config.h"
-#include "display_st7789.h"
-#include "n32_link.h"
-#include "pcm_out.h"
-
-#include "app/alarm.h"
 #include "app/app_cmd.h"
 #include "app/app_config.h"
 #include "app/app_net.h"
 #include "app/player.h"
+#include "board_config.h"
 #include "net/web_server.h"
+
+#if WAC_HEADLESS
+// ==================== AlphaPi 微控制器 (C3, headless) ====================
+
+#include "app_bus.h"
+#include "headless/keys_c3.h"
+#include "headless/led_matrix.h"
+
+void setup()
+{
+    Serial.begin(115200);  // -> WacLog 环形缓冲，80 端口 GET /log 查看
+    delay(50);
+    Serial.printf("\n[ boot ] headless build %s %s\n", __DATE__, __TIME__);
+    Serial.printf("[ boot ] AlphaPi 微控制器 C3, psram=%u KB, flash=%u MB\n",
+                  (unsigned)(ESP.getPsramSize() / 1024),
+                  (unsigned)(ESP.getFlashChipSize() >> 20));
+
+    // 0) 常驻网络缓冲：此刻堆最干净，24KB 一次到位（C3 碎片化防治的根基）
+    netbuf_boot();
+
+    // 1) 电池分压脚定位：GPIO0~5 浮空扫一遍（必须在 keys_c3_begin 的下拉挂载
+    //      **之前**，否则被 45k 下拉加载读数失真）。GPIO5=ADC2/P1 焊盘，
+    //      ADC2 与 WiFi 互斥只能在 WiFi 启动前读。
+    //      电池电压特征：稳定不动、量级在 分压后 ~1.5-2.1V 或直连 ~3.0-4.2V；
+    //      悬空脚会乱跳或贴 0。从 /log 认出来后 -DBATTERY_ADC_PIN=n 固定。
+    analogReadResolution(12);
+    for (int pin = 0; pin <= 5; pin++) {
+        uint32_t sum = 0;
+        for (int i = 0; i < 16; i++) { sum += analogRead(pin); delay(2); }
+        Serial.printf("[bat ] GPIO%d raw=%u ~%umV%s\n", pin, (unsigned)(sum / 16),
+                      (unsigned)((sum / 16) * 3300 / 4095), pin == 5 ? " (ADC2,仅开机可读)" : "");
+    }
+
+    // 1.5) I2C 总线扫描（SDA=6 SCL=7）：确认 SC7A20 加速度计之外，
+    //      有没有电量计之类的芯片（有就直接读芯片，不用 ADC 分压）
+    Wire.begin(6, 7);
+    Serial.println("[i2c ] 设备扫描:");
+    for (uint8_t a = 1; a < 127; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("[i2c ]   0x%02X 应答\n", a);
+        }
+    }
+    Wire.end();  // 暂时不用 I2C，释放总线
+
+    // 2) 配置存储：LittleFS 挂载，player_begin 读音量缓存依赖它
+    cfg_begin();
+
+    // 3) 点阵显示 + 按键。app_bus 必须在 player_begin 之前接好，
+    //    不然启动早期的 PLAY/VOL 事件没人消费
+    app_bus_init(led_matrix_on_event);
+    led_matrix_begin();
+    keys_c3_begin();
+
+    // 4) 网络（没凭据会进 AP 配网，配好自动重启）
+    net_begin();
+    time_begin();
+
+    web_server_start(8080);
+    player_begin();   // 内部会 n32_init + pcm_out_begin
+    app_cmd_init();   // 内部会起闹钟
+    Serial.printf("[mem ] free=%u maxblk=%u\n", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    Serial.println("[ boot ] ready");
+}
+
+void loop()
+{
+    // 无屏无 LVGL：net_loop/alarm_tick 由 alarm 任务每秒调，这里空转即可
+    vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+#else
+// ==================== AlphaPi One (S3) ====================
+
+#include <lvgl.h>
+
+#include "app/alarm.h"
+#include "display_st7789.h"
+#include "n32_link.h"
+#include "pcm_out.h"
 #include "ui_port/ui_app.h"
 
 static lv_display_t *s_disp = NULL;
@@ -127,3 +207,5 @@ void loop()
     lv_timer_handler();
     delay(5);
 }
+
+#endif  // WAC_HEADLESS

@@ -34,8 +34,9 @@ bool SongList::push(const String &s)
     if (n == cap) {
         int nc = cap ? cap + 8 : 16;
         char **nv = (char **)ps_malloc(sizeof(char *) * nc);
+        if (!nv) nv = (char **)malloc(sizeof(char *) * nc);  // C3 无 PSRAM，退内部 RAM
         if (!nv) {
-            ALOG("player", "歌单 ps_malloc 失败 (%d)", nc);
+            ALOG("player", "歌单 malloc 失败 (%d)", nc);
             return false;
         }
         if (v) {
@@ -47,6 +48,7 @@ bool SongList::push(const String &s)
     }
     size_t len = s.length();
     char *p = (char *)ps_malloc(len + 1);
+    if (!p) p = (char *)malloc(len + 1);
     if (!p) return false;
     memcpy(p, s.c_str(), len + 1);
     v[n++] = p;
@@ -80,6 +82,7 @@ bool SongList::insert_front(const String &s)
     if (n == cap) {
         int nc = cap ? cap + 8 : 16;
         char **nv = (char **)ps_malloc(sizeof(char *) * nc);
+        if (!nv) nv = (char **)malloc(sizeof(char *) * nc);
         if (!nv) return false;
         if (v) {
             memcpy(nv, v, sizeof(char *) * n);
@@ -90,9 +93,10 @@ bool SongList::insert_front(const String &s)
     }
     size_t len = s.length();
     char *p = (char *)ps_malloc(len + 1);
+    if (!p) p = (char *)malloc(len + 1);
     if (!p) return false;
     memcpy(p, s.c_str(), len + 1);
-    memmove(v + 1, v, sizeof(char *) * n);
+    memmove(v + 1, v, sizeof(char *) * (n - 1));
     v[0] = p;
     n++;
     return true;
@@ -240,6 +244,19 @@ static void apply_volume(int v, bool notify)
     ALOG("player", "音量 %d", v);
 }
 
+// N32 硬件音量只有 0~6 档：volp/volm/按键每次精确走一档。
+// 0-100 只是协议与 UI 的表示（档中心值 0/17/33/50/67/83/100），反算要保证
+// apply_volume 再映射回同一档：hw=(v*6+50)/100，v=(hw*100+3)/6。
+static void vol_step_hw(int dir)
+{
+    const int v = player_vol();
+    int hw = (v * 6 + 50) / 100;
+    hw += dir;
+    if (hw < 0) hw = 0;
+    if (hw > 6) hw = 6;
+    apply_volume((hw * 100 + 3) / 6, true);
+}
+
 static bool looks_like_source(const String &v)
 {
     if (v.length() > 4 && v.startsWith("http")) return true;
@@ -374,6 +391,12 @@ static void close_src(File &f, HttpStream *h)
 }
 
 // 返回 true = 正常放完；false = 打开失败/解码失败
+// MP3 解码器常驻单例：一次分配终身复用。之前每首歌 new/delete（8.7KB），
+// 和 WiFi/TLS/歌单缓冲来回穿插，C3 无 PSRAM 的堆几轮就碎片化到 8.7KB 都拿不出
+//（实测 free 19KB / maxblk 7.6KB 时解码器分配失败 → 闹钟时 12KB 歌单缓冲也拿不出）。
+// MP3 流自带帧同步头，换歌时 write() 自动重新同步，无需重建解码器。
+static libhelix::MP3DecoderHelix *s_decoder = nullptr;
+
 static bool stream_track(const String &url, uint32_t gen)
 {
     bool is_http = url.startsWith("http");
@@ -411,19 +434,23 @@ static bool stream_track(const String &url, uint32_t gen)
     }
 
     uint8_t *buf = (uint8_t *)ps_malloc(4096);
+    if (!buf) buf = (uint8_t *)malloc(4096);  // C3 无 PSRAM，退内部 RAM
     if (!buf) {
         ALOG("player", "mp3 输入缓冲申请失败");
         close_src(f, h);
         return false;
     }
 
-    libhelix::MP3DecoderHelix *dec = new libhelix::MP3DecoderHelix(pcm_cb);
-    if (!dec || !dec->begin()) {
-        ALOG("player", "MP3 解码器初始化失败");
-        delete dec;
-        free(buf);
-        close_src(f, h);
-        return false;
+    if (!s_decoder) {
+        s_decoder = new libhelix::MP3DecoderHelix(pcm_cb);
+        if (!s_decoder || !s_decoder->begin()) {
+            ALOG("player", "MP3 解码器初始化失败");
+            delete s_decoder;
+            s_decoder = nullptr;
+            free(buf);
+            close_src(f, h);
+            return false;
+        }
     }
 
     s_produced.store(false);
@@ -465,13 +492,12 @@ static bool stream_track(const String &url, uint32_t gen)
             n = (int)f.read(buf, 4096);
             if (n <= 0) break;
         }
-        dec->write(buf, (size_t)n);
+        s_decoder->write(buf, (size_t)n);
     }
 
     bool produced = s_produced.load();
-    if (!aborted) dec->flush();  // 收尾只把最后一帧解掉，取消时不要再往环里灌
+    if (!aborted) s_decoder->flush();  // 收尾只把最后一帧解掉，取消时不要再往环里灌
 
-    delete dec;
     free(buf);
     close_src(f, h);
 
@@ -1074,8 +1100,8 @@ static void handle_cmd(Cmd *c)
         }
         case CMD_PLAY_ALARM: ctrl_play_alarm(); break;
         case CMD_VOL_SET: apply_volume(c->ival, true); break;
-        case CMD_VOL_UP: app_bus_event("VOLP"); apply_volume(player_vol() + 5, true); break;
-        case CMD_VOL_DOWN: app_bus_event("VOLM"); apply_volume(player_vol() - 5, true); break;
+        case CMD_VOL_UP: app_bus_event("VOLP"); vol_step_hw(+1); break;
+        case CMD_VOL_DOWN: app_bus_event("VOLM"); vol_step_hw(-1); break;
         case CMD_PAUSED_FLAG: {
             PLock lk;
             if (!s.stop) s.paused = c->ival != 0;

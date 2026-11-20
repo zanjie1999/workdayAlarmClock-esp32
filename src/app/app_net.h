@@ -44,6 +44,12 @@ bool http_post_form(const String &url, const String &form, const String &cookie,
 char *http_get_ps(const String &url, const String &cookie, size_t cap, size_t *out_len,
                   int retries = 2);
 
+#if WAC_HEADLESS
+// C3：开机尽早分配 24KB 常驻网络缓冲（此刻堆最干净），之后所有
+// http_get_*/http_post_* 复用它，杜绝大块 alloc/free 把堆揉碎
+void netbuf_boot(void);
+#endif
+
 String url_encode(const String &s);
 
 // ---------------------------------------------------------------- 极简 JSON

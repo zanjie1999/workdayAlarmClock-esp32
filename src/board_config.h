@@ -143,3 +143,18 @@
 #ifndef KEY_ACTIVE_LOW
 #define KEY_ACTIVE_LOW 1
 #endif
+
+// ---------------- C3 headless 按键 (AlphaPi 微控制器) ----------------
+// 实测定案（板上猎捕模式跑出来的真值；逆向文章的 10/20/21 是 N32 侧引脚号，
+// 不是 C3 的 GPIO——20/21 实际是桥控制台串口）：A=10 B=1 C=3，
+// Pin(x, IN, PULL_DOWN) 按下=高（与 One 的低有效相反）。
+// 语义：音量减（长按上一首）/ 播放暂停（长按停止）/ 音量加（长按下一首）
+#ifndef PIN_KEY_VOLDOWN
+#define PIN_KEY_VOLDOWN -1
+#endif
+#ifndef PIN_KEY_PLAY
+#define PIN_KEY_PLAY -1
+#endif
+#ifndef PIN_KEY_VOLUP
+#define PIN_KEY_VOLUP -1
+#endif

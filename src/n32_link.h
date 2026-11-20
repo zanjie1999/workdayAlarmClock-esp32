@@ -36,6 +36,9 @@ bool n32_set_volume(uint8_t percent);
 // 读按键：返回 A/B 的原始字节（高电平有效，按下该位为 1；参考工程 config.h 同款）
 bool n32_read_keys(uint8_t *ab_raw);
 
+// 诊断用裸读寄存器（C3 板按键真源定位：原厂库读 0x00 是 8 字节，len<=64）
+bool n32_read_reg(uint8_t addr, uint8_t len, uint8_t *out);
+
 // 读 L/R：老固件的 uart_read(0,1)[3]，bit1=L bit0=R（高电平有效）
 bool n32_read_lr(uint8_t *lr_raw);
 
@@ -43,6 +46,11 @@ bool n32_read_lr(uint8_t *lr_raw);
 // 200 字节分块，用写响应 resp[2] 做响应驱动流控，✅ v5 手册 §3.5/§3.6）
 // 返回实际写入的样本数，< count 表示超时/失败
 size_t n32_write_pcm(const int16_t *samples, size_t count);
+
+// 写 5x5 LED 点阵（仅 AlphaPi 微控制器/C3 板上有，One 没有屏外显示）：
+// 寄存器 0x08，5 字节 = 5 列，bit7=第 1 行 ... bit3=第 5 行。
+// 帧格式与协议同 0x90 写寄存器；调用方低频更新（事件驱动），音频流间隙插入。
+bool n32_write_led(const uint8_t *cols5);
 
 // 播放时要求暂停录音（半双工）
 bool n32_set_record(bool on);

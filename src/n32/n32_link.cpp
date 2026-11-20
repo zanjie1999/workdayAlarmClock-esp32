@@ -274,7 +274,13 @@ bool n32_init(void)
     bool installed = false;
     esp_err_t err = uart_param_config(N32_UART, &cfg);
     if (err == ESP_OK) {
+#if WAC_HEADLESS
+        // GPIO9 兼 C3 的 BOOT strap（拉低=下载模式）：内部上拉会碍着桥把它
+        // 拉低进下载模式（实测跑着固件时 esptool 连不上，拔插才恢复）
+        pinMode(PIN_N32_RX, INPUT);
+#else
         pinMode(PIN_N32_RX, INPUT_PULLUP);
+#endif
         err = uart_set_pin(N32_UART, PIN_N32_TX, PIN_N32_RX,
                            UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     }
@@ -304,6 +310,17 @@ bool n32_init(void)
     return true;
 }
 
+// 诊断用裸读寄存器（带互斥；len<=64）
+bool n32_read_reg(uint8_t addr, uint8_t len, uint8_t *out)
+{
+    if (!s_inited || !out || len == 0 || len > 64) return false;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+    bool ok = read_reg_locked(addr, len, out, N32_READ_TIMEOUT_MS);
+    xSemaphoreGive(s_mutex);
+    if (ok) s_present = true;
+    return ok;
+}
+
 bool n32_present(void)
 {
     if (!s_inited) return false;
@@ -315,6 +332,18 @@ bool n32_present(void)
 
     xSemaphoreGive(s_mutex);
     if (ok) s_present = true;
+    return ok;
+}
+
+// 5x5 LED 点阵（AlphaPi 微控制器/C3 板）：寄存器 0x08，5 字节=5 列，bit7=第 1 行。
+// 与音频流共用这条 UART：写寄存器会先 drain 残留应答再等自己的 ACK，
+// 全程持锁，音频泵在锁外排队，不会互踩。
+bool n32_write_led(const uint8_t *cols5)
+{
+    if (!s_inited || !cols5) return false;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    bool ok = write_reg_locked(0x08, cols5, 5, N32_ACK_TIMEOUT_MS) >= 0;
+    xSemaphoreGive(s_mutex);
     return ok;
 }
 

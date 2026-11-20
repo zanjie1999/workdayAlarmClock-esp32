@@ -26,7 +26,13 @@
 // 输出必须重采样到 24000（头里也写 24000），8-bit 转换在 n32_write_pcm 里做。
 #define OUT_RATE 24000
 #define OUT_SAMPLES_PER_MS (OUT_RATE / 1000)      // ~22
+#if WAC_HEADLESS
+// C3 无 PSRAM：实测启动后 free 仅 ~54KB（WiFi+任务栈吃掉大半），1.5s 环=72KB 必死，
+// 0.75s=36KB 换 TLS/歌单的活路（泵任务优先级最高，稳态环占用仅 ~100ms，够用）
+#define RING_SAMPLES (OUT_RATE * 3 / 4)           // 18000 样本 = 36000 字节 = 0.75s
+#else
 #define RING_SAMPLES (OUT_RATE * 3 / 2)           // 33075 样本 = 66150 字节 = 1.5s
+#endif
 #define FEED_SAMPLES N32_BLOCK_BYTES              // 200 样本 -> 一整块 200 字节 u8
 
 // 稳态参数，数值照抄 Go 版

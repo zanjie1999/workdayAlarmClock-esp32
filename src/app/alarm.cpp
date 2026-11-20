@@ -12,6 +12,7 @@
 
 static bool s_started = false;
 static bool s_wd_err = true;       // 工作日接口是否出错（对应 WorkDayApiErr）
+static uint32_t s_wd_next_try = 0; // 失败退避：C3 上 TLS 会话是内存大户，失败后 10 分钟再试
 static bool s_is_workday = false;  // 对应 conf.IsWorkDay
 static String s_wd_date;           // 结果对应的 yyyymmdd
 static String s_last_hhmm;         // 对应 lasthhmm
@@ -246,8 +247,12 @@ void alarm_tick()
     if (hhmm == s_last_hhmm) return;
     s_last_hhmm = hhmm;
 
-    // 出错每分钟重试（刚开机没网 / 时间刚到 2025+ 都走这里），换日也刷一次
-    if (s_wd_err || hhmm == "0000") workday_refresh();
+    // 出错每分钟重试（刚开机没网 / 时间刚到 2025+ 都走这里），换日也刷一次。
+    // C3 上 TLS 握手是内存大户，失败退避 10 分钟，别和歌曲解析的 TLS 抢堆
+    if ((s_wd_err || hhmm == "0000") && (int32_t)(millis() - s_wd_next_try) >= 0) {
+        workday_refresh();
+        if (s_wd_err) s_wd_next_try = millis() + 600000;
+    }
 
     // 天气（对齐 Go 定时器）：开机时间同步成功后先拉一次，之后每小时整点拉一次；
     // 另外每天 weatherUpdate（hhmm）时刻拉一次。weather_refresh 内部有

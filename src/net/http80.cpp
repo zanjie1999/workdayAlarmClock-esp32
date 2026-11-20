@@ -3,10 +3,15 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+
+#if WAC_HEADLESS
+#include "headless/weblog.h"  // headless 构建的日志查看入口（GET /log）
+#else
 #include <lvgl.h>
+#include "../ui_port/ui/ui_font.h"
+#endif
 
 #include "prov_portal.h"
-#include "../ui_port/ui/ui_font.h"
 #include "../web/api_alarm.h"
 #include "../web/web_media.h"
 #include "../web/web_ota.h"
@@ -14,6 +19,7 @@
 #include "../web/web_extra.h"
 #include "../web/webui.h"
 
+#if !WAC_HEADLESS
 // ---------------------------------------------------------------- 首配提示屏
 //
 // 修"第一次启动没配网时屏幕是雪花"：雪花 = 面板初始化后从未刷过一帧的 RAM
@@ -64,6 +70,11 @@ static void prov_hide_banner(void)
     s_prov_card = nullptr;
     lv_refr_now(NULL);
 }
+#else
+// headless 无屏：提示卡不存在，空实现保持 prov_ap_run 的调用点不变
+static inline void prov_show_banner(void) {}
+static inline void prov_hide_banner(void) {}
+#endif
 
 static httpd_handle_t s_srv = nullptr;
 
@@ -76,7 +87,12 @@ httpd_handle_t http80_start(void)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.max_uri_handlers = 64;   // 实际约 41 条；45058 是重复注册，不是槽位不够
     cfg.lru_purge_enable = true;
+#if WAC_HEADLESS
+    // C3 内存紧张：16K 栈是 S3 上代理 TLS 握手的配置，C3 用 10K（free 实测仅 ~100KB）
+    cfg.stack_size = 10240;
+#else
     cfg.stack_size = 16384;  // 代理要在 httpd 任务里做 TLS 握手，8K 栈不够
+#endif
     cfg.core_id = 0;  // 定核 0（默认 tskNO_AFFINITY 会浮动到核 1 抢解码）；与 LVGL/8080 同核
     cfg.recv_wait_timeout = 5;
     cfg.send_wait_timeout = 5;
@@ -114,6 +130,12 @@ httpd_handle_t http80_start(void)
     if (web_ota_register(s_srv) != ESP_OK) {
         Serial.println("[http80] OTA 注册失败");
     }
+#if WAC_HEADLESS
+    // headless：无屏，/log 是唯一的日志窗口（精确路径，必须先于静态页通配注册）
+    if (weblog_register(s_srv) != ESP_OK) {
+        Serial.println("[http80] /log 注册失败");
+    }
+#endif
     // 控制台最后注册：里面有静态页通配，必须排在所有精确路径之后
     if (webui_register(s_srv) != ESP_OK) {
         Serial.println("[http80] 控制台注册失败");
@@ -158,7 +180,9 @@ bool prov_ap_run(uint32_t timeout_ms)
     const uint32_t t0 = millis();
     while (timeout_ms == 0 || millis() - t0 < timeout_ms) {
         delay(20);
+#if !WAC_HEADLESS
         lv_timer_handler();  // 配网页面照常工作，屏幕持续刷新
+#endif
     }
 
     prov_hide_banner();

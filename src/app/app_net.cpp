@@ -3,6 +3,7 @@
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <esp_heap_caps.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -309,6 +310,14 @@ static HttpStream *stream_open(const char *method, const String &url, const Stri
         }
         s->close_conn();
 
+        // 诊断：DNS 解析结果（排查"连上了但 0 字节响应"——可能解析到不响应的节点）
+        IPAddress rip;
+        if (WiFi.hostByName(host.c_str(), rip)) {
+            ALOG("net", "DNS %s -> %s", host.c_str(), rip.toString().c_str());
+        } else {
+            ALOG("net", "DNS %s 解析失败", host.c_str());
+        }
+
         if (https) {
             s->secure = new WiFiClientSecure();
             if (!s->secure) {
@@ -318,7 +327,9 @@ static HttpStream *stream_open(const char *method, const String &url, const Stri
             s->secure->setInsecure();  // 省 RAM，不校验证书
             s->secure->setTimeout((int)(timeout_ms / 1000));
             if (s->secure->connect(host.c_str(), port, timeout_ms) != 1) {
-                ALOG("net", "TLS 连接失败 %s:%u", host.c_str(), (unsigned)port);
+                ALOG("net", "TLS 连接失败 %s:%u (free=%u maxblk=%u)", host.c_str(),
+                     (unsigned)port, (unsigned)ESP.getFreeHeap(),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
                 s->close_conn();
                 delete s;
                 return nullptr;
@@ -333,6 +344,8 @@ static HttpStream *stream_open(const char *method, const String &url, const Stri
             }
             s->c = &s->plain;
         }
+        ALOG("net", "已连 %s:%u remote=%s free=%u", host.c_str(), (unsigned)port,
+             s->c->remoteIP().toString().c_str(), (unsigned)ESP.getFreeHeap());
 
         String req;
         req.reserve(256 + body.length());
@@ -468,13 +481,162 @@ static bool collect(HttpStream *s, char *dst, size_t cap, size_t *out_len)
     return total > 0;
 }
 
+#if WAC_HEADLESS
+// ---- C3 网络抓取缓冲：常驻单块（24KB），互斥复用 ----
+// 无 PSRAM 的堆最怕大块 alloc/free 反复穿插：实测 boot 后 30 秒内 maxblk
+// 从 59KB 塌到 7.6KB（请求缓冲+TLS 残骸+解码器轮换），之后 12KB 都拿不出。
+// 改为开机堆还干净时一次分配 24KB（netbuf_boot，main 里尽早调），之后所有
+// HTTP 请求（串行化，本就少并发）复用这一块，彻底消灭碎片源。
+// 请求按各自需要用其中的前 N 字节（weapi 响应 <4KB、节假日/天气 <10KB、
+// 歌单 n=50 <12KB），S3 走 PSRAM 原逻辑不受影响。
+static SemaphoreHandle_t s_nb_mu = nullptr;
+static char *s_nb = nullptr;
+constexpr size_t kNbCap = 24 * 1024;
+
+void netbuf_boot(void)
+{
+    if (!s_nb_mu) s_nb_mu = xSemaphoreCreateMutex();
+    if (!s_nb) s_nb = (char *)heap_caps_malloc(kNbCap, MALLOC_CAP_8BIT);
+    ALOG("net", "网络缓冲 %s：%uB", s_nb ? "ok" : "分配失败", (unsigned)kNbCap);
+}
+
+// 拿到常驻缓冲返回 true（用完必须 netbuf_release）；拿不到返回 false（调用方自己兜底）
+static bool netbuf_acquire(char **out)
+{
+    if (!s_nb_mu) {
+        s_nb_mu = xSemaphoreCreateMutex();
+        if (!s_nb) s_nb = (char *)heap_caps_malloc(kNbCap, MALLOC_CAP_8BIT);
+    }
+    if (!s_nb || !s_nb_mu) return false;
+    return xSemaphoreTake(s_nb_mu, pdMS_TO_TICKS(15000)) == pdTRUE;
+}
+
+static void netbuf_release(void)
+{
+    if (s_nb_mu) xSemaphoreGive(s_nb_mu);
+}
+#endif  // netbuf
+
+#if WAC_HEADLESS
+// ---- C3 实现：请求缓冲一律用常驻单块，不再有大块 alloc/free 穿插 ----
+
 bool http_get_str(const String &url, const String &cookie, String *out, int retries)
 {
     for (int attempt = 0; attempt <= retries; attempt++) {
         int status = 0;
         HttpStream *s = http_stream_open(url, cookie, &status);
         if (s) {
-            const size_t cap = 64 * 1024;
+            char *buf = nullptr;
+            if (!netbuf_acquire(&buf)) {
+                http_stream_close(s);
+                ALOG("net", "GET 网络缓冲被占用，跳过 %s", url.c_str());
+                return false;
+            }
+            size_t len = 0;
+            bool ok = collect(s, buf, kNbCap, &len);
+            http_stream_close(s);
+            if (ok) {
+                *out = String(buf);
+                netbuf_release();
+                return true;
+            }
+            netbuf_release();
+            ALOG("net", "GET %s 读响应失败（收到 %u 字节）", url.c_str(), (unsigned)len);
+        }
+        if (attempt < retries) {
+            ALOG("net", "请求失败，重试 %d/%d: %s", attempt + 1, retries, url.c_str());
+            vTaskDelay(pdMS_TO_TICKS(600));
+        }
+    }
+    ALOG("net", "请求最终失败: %s", url.c_str());
+    return false;
+}
+
+bool http_post_form(const String &url, const String &form, const String &cookie, String *out,
+                    int retries)
+{
+    for (int attempt = 0; attempt <= retries; attempt++) {
+        int status = 0;
+        HttpStream *s = stream_open("POST", url, cookie, form,
+                                   "application/x-www-form-urlencoded", &status);
+        if (s) {
+            char *buf = nullptr;
+            if (!netbuf_acquire(&buf)) {
+                http_stream_close(s);
+                ALOG("net", "POST 网络缓冲被占用，跳过 %s", url.c_str());
+                return false;
+            }
+            size_t len = 0;
+            bool ok = collect(s, buf, kNbCap, &len);
+            http_stream_close(s);
+            if (ok) {
+                *out = String(buf);
+                netbuf_release();
+                return true;
+            }
+            netbuf_release();
+            ALOG("net", "POST %s 读响应失败 status=%d（收到 %u 字节）", url.c_str(), status,
+                 (unsigned)len);
+        }
+        if (attempt < retries) {
+            ALOG("net", "POST 失败，重试 %d/%d", attempt + 1, retries);
+            vTaskDelay(pdMS_TO_TICKS(600));
+        }
+    }
+    ALOG("net", "POST 最终失败: %s (free=%u maxblk=%u)", url.c_str(), (unsigned)ESP.getFreeHeap(),
+         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    return false;
+}
+
+char *http_get_ps(const String &url, const String &cookie, size_t cap, size_t *out_len,
+                  int retries)
+{
+    if (cap > kNbCap) {
+        ALOG("net", "http_get_ps cap %u 超过常驻缓冲 %uB", (unsigned)cap, (unsigned)kNbCap);
+        return nullptr;
+    }
+    for (int attempt = 0; attempt <= retries; attempt++) {
+        int status = 0;
+        HttpStream *s = http_stream_open(url, cookie, &status);
+        if (s) {
+            char *buf = nullptr;
+            if (!netbuf_acquire(&buf)) {
+                http_stream_close(s);
+                ALOG("net", "分配 %u 字节失败（网络缓冲被占用）", (unsigned)cap);
+                return nullptr;
+            }
+            bool ok = collect(s, buf, cap, out_len);
+            http_stream_close(s);
+            if (ok && *out_len > 0) {
+                // 常驻缓冲要还回去，拷一份精确大小的给调用方（调用方负责 free）
+                char *out = (char *)malloc(*out_len + 1);
+                if (out) {
+                    memcpy(out, buf, *out_len + 1);
+                    netbuf_release();
+                    return out;
+                }
+                ALOG("net", "拷贝 %u 字节失败 (maxblk=%u)", (unsigned)(*out_len + 1),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+            }
+            netbuf_release();
+        }
+        if (attempt < retries) vTaskDelay(pdMS_TO_TICKS(600));
+    }
+    return nullptr;
+}
+#else
+const size_t kHttpGetCap = 64 * 1024;
+const size_t kHttpPostCap = 64 * 1024;
+
+// ---- S3 原实现（PSRAM 充足，维持原逻辑）----
+
+bool http_get_str(const String &url, const String &cookie, String *out, int retries)
+{
+    for (int attempt = 0; attempt <= retries; attempt++) {
+        int status = 0;
+        HttpStream *s = http_stream_open(url, cookie, &status);
+        if (s) {
+            const size_t cap = kHttpGetCap;
             char *buf = (char *)ps_malloc(cap);
             if (!buf) buf = (char *)malloc(cap);
             if (buf) {
@@ -487,8 +649,11 @@ bool http_get_str(const String &url, const String &cookie, String *out, int retr
                     return true;
                 }
                 free(buf);
+                ALOG("net", "GET %s 读响应失败（收到 %u 字节）", url.c_str(), (unsigned)len);
             } else {
                 http_stream_close(s);
+                ALOG("net", "GET %s 缓冲分配失败 %uB (maxblk=%u)", url.c_str(), (unsigned)cap,
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
             }
         }
         if (attempt < retries) {
@@ -508,7 +673,7 @@ bool http_post_form(const String &url, const String &form, const String &cookie,
         HttpStream *s = stream_open("POST", url, cookie, form,
                                    "application/x-www-form-urlencoded", &status);
         if (s) {
-            const size_t cap = 64 * 1024;
+            const size_t cap = kHttpPostCap;
             char *buf = (char *)ps_malloc(cap);
             if (!buf) buf = (char *)malloc(cap);
             if (buf) {
@@ -521,8 +686,12 @@ bool http_post_form(const String &url, const String &form, const String &cookie,
                     return true;
                 }
                 free(buf);
+                ALOG("net", "POST %s 读响应失败 status=%d（收到 %u 字节）", url.c_str(), status,
+                     (unsigned)len);
             } else {
                 http_stream_close(s);
+                ALOG("net", "POST %s 缓冲分配失败 %uB (maxblk=%u)", url.c_str(), (unsigned)cap,
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
             }
         }
         if (attempt < retries) {
@@ -530,6 +699,8 @@ bool http_post_form(const String &url, const String &form, const String &cookie,
             vTaskDelay(pdMS_TO_TICKS(600));
         }
     }
+    ALOG("net", "POST 最终失败: %s (free=%u maxblk=%u)", url.c_str(), (unsigned)ESP.getFreeHeap(),
+         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     return false;
 }
 
@@ -541,9 +712,10 @@ char *http_get_ps(const String &url, const String &cookie, size_t cap, size_t *o
         HttpStream *s = http_stream_open(url, cookie, &status);
         if (s) {
             char *buf = (char *)ps_malloc(cap);
+            if (!buf) buf = (char *)malloc(cap);  // PSRAM 不够退内部 RAM
             if (!buf) {
                 http_stream_close(s);
-                ALOG("net", "PSRAM 分配 %u 字节失败", (unsigned)cap);
+                ALOG("net", "分配 %u 字节失败", (unsigned)cap);
                 return nullptr;
             }
             bool ok = collect(s, buf, cap, out_len);
@@ -555,6 +727,7 @@ char *http_get_ps(const String &url, const String &cookie, size_t cap, size_t *o
     }
     return nullptr;
 }
+#endif
 
 String url_encode(const String &s)
 {

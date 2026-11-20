@@ -193,6 +193,33 @@ static void json_esc_append(String &out, const String &s)
     }
 }
 
+#if WAC_HEADLESS
+// C3 headless：手表有电池，但分压脚还没实测定位（boot 时有 GPIO0~4 的 ADC 扫描，
+// 见 main.cpp，从 /log 找出读数是电池电压的那个脚后，用 -DBATTERY_ADC_PIN=n 固定）。
+// BATTERY_ADC_PIN 未知时返回 -1（= web 状态页的"无电量数据"，UI 本来就有这个分支）。
+#ifndef BATTERY_ADC_PIN
+#define BATTERY_ADC_PIN -1
+#endif
+extern "C" int battery_percent(void)
+{
+#if BATTERY_ADC_PIN < 0
+    return -1;
+#else
+    // 12bit + 11dB 衰减，满量程 ~3.3V；百分比按锂电池 3.3V=0% / 4.2V=100% 线性折算，
+    // 分压比未知，首次上电用 /log 的实测 mV 校准
+    analogReadResolution(12);
+    uint32_t sum = 0;
+    for (int i = 0; i < 8; i++) sum += analogRead(BATTERY_ADC_PIN);
+    const uint32_t mv = (sum / 8) * 3300 / 4095;
+    if (mv < 100) return -1;  // 引脚悬空/量程外
+    int pct = (int)((mv - 3300) * 100 / (4200 - 3300));
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+#endif
+}
+#endif
+
 static esp_err_t h_status(httpd_req_t *req)
 {
     // player.h 的状态读接口都是短暂加锁，不做网络/文件 IO，不会阻塞

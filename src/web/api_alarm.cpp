@@ -667,7 +667,8 @@ esp_err_t h_set_cookie(httpd_req_t *req)
     bool has = qhas(req, "cookie", &cookie);
     if (!cookie.length()) {
         String body;
-        if (recv_body(req, &body, 1024) && kv_find(body.c_str(), "cookie", &cookie)) has = true;
+        // 真实登录 cookie 2~5KB（urlencoded 后更长），1024 会把 web 登录全拒掉
+        if (recv_body(req, &body, 8192) && kv_find(body.c_str(), "cookie", &cookie)) has = true;
     }
     cookie = appstr::trim(has ? cookie : String());
 

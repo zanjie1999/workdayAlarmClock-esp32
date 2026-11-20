@@ -328,8 +328,10 @@ bool pcm_out_begin(void)
     eq_set_rate(OUT_RATE);
 
     // 核 1 = 音频链专用核（player_ctl/player_io/alarm 同核）；
-    // 核 0 留给 WiFi/lwIP + LVGL + 80 口 httpd + 8080（见 platformio.ini 的 ARDUINO_RUNNING_CORE）
-    BaseType_t ok = xTaskCreatePinnedToCore(pcm_task, "pcm_out", 4096, NULL, 2, &s_task, 1);
+    // 核 0 留给 WiFi/lwIP + LVGL + 80 口 httpd + 8080（见 platformio.ini 的 ARDUINO_RUNNING_CORE）。
+    // 优先级 4 > 解码(3)：泵每 8.3ms 必须发一块（墙钟实时），解锁后要立刻被调度，
+    // 否则被解码突发压着走空环形缓冲 -> N32 ACK 超时级联 -> 断流
+    BaseType_t ok = xTaskCreatePinnedToCore(pcm_task, "pcm_out", 4096, NULL, 4, &s_task, 1);
     if (ok != pdPASS) {
         Serial.println("[pcm] task create failed");
         s_inited = false;
